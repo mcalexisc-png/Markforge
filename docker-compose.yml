@@ -1,0 +1,72 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: markforge-backend
+    environment:
+      MARKFORGE_ENV: production
+      MARKFORGE_HOST: 0.0.0.0
+      MARKFORGE_JOB_MODE: ${JOB_MODE:-sync}
+      MARKFORGE_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MARKFORGE_LAN_MODE: ${LAN_MODE:-off}
+      MARKFORGE_LAN_PASSWORD: ${LAN_PASSWORD:-}
+      MARKFORGE_MAX_FILE_MB: ${MAX_FILE_MB:-100}
+      MARKFORGE_MAX_FILES_PER_JOB: ${MAX_FILES_PER_JOB:-10}
+    volumes:
+      - markforge-data:/data
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: markforge-frontend
+    environment:
+      API_PROXY_TARGET: http://backend:3001
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: markforge-redis
+    profiles: ["celery"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: markforge-worker
+    profiles: ["celery"]
+    command: ["celery", "-A", "workers.celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    environment:
+      MARKFORGE_ENV: production
+      MARKFORGE_JOB_MODE: celery
+      MARKFORGE_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - markforge-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  markforge-data:

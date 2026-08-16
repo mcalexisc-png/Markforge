@@ -1,0 +1,11 @@
+.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.next
+**/node_modules
+**/storage
+**/test-results
+backend/*.pdf
+frontend/e2e/fixtures
+.dockerignore

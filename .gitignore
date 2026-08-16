@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Storage (user data, uploaded files, outputs)
+storage/
+
+# Logs & misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+backend/tests/e2e-results/
+playwright-report/
+test-results/
+frontend/e2e/fixtures/
+*.db
+*.db-wal
+*.db-shm
