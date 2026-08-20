@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,10 +9,11 @@ const backendDir = join(root, "backend");
 const outDir = join(here, "fixtures");
 mkdirSync(outDir, { recursive: true });
 
-const python =
+const venvPython =
   process.platform === "win32"
     ? join(backendDir, ".venv", "Scripts", "python.exe")
     : join(backendDir, ".venv", "bin", "python");
+const python = existsSync(venvPython) ? venvPython : "python";
 
 const code = `
 import sys

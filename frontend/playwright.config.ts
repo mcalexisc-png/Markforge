@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,10 +8,11 @@ process.env.MARKFORGE_E2E_DATA =
   join(tmpdir(), `markforge-e2e-${Date.now()}`);
 
 const e2eData = process.env.MARKFORGE_E2E_DATA;
-const backendPython =
+const venvPython =
   process.platform === "win32"
-    ? join(".venv", "Scripts", "python.exe")
-    : join(".venv", "bin", "python");
+    ? join("..", "backend", ".venv", "Scripts", "python.exe")
+    : join("..", "backend", ".venv", "bin", "python");
+const backendPython = existsSync(venvPython) ? venvPython : "python";
 
 export default defineConfig({
   testDir: "./e2e",
