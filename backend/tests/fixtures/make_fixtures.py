@@ -160,149 +160,37 @@ def make_two_column_pdf(path: Path) -> Path:
     return path
 
 
-def make_docx_reviewed(path: Path) -> Path:
-    """DOCX with a review comment and tracked changes (insert/delete)."""
-
-    from docx import Document
-    from docx.opc.packuri import PackURI
-    from docx.opc.part import Part
-    from docx.oxml import OxmlElement
-    from docx.oxml.ns import qn
-
-    doc = Document()
-    doc.add_heading("Reviewed Document", level=0)
-    target = doc.add_paragraph("This paragraph carries a review comment.")
-
-    comments_xml = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        '<w:comment w:id="0" w:author="Reviewer" w:date="2026-08-16T10:00:00Z" w:initials="R">'
-        "<w:p><w:r><w:t>Needs a citation.</w:t></w:r></w:p>"
-        "</w:comment></w:comments>"
-    )
-    comments_part = Part(
-        PackURI("/word/comments.xml"),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
-        comments_xml.encode("utf-8"),
-        doc.part.package,
-    )
-    doc.part.relate_to(
-        comments_part,
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",
-    )
-
-    start = OxmlElement("w:commentRangeStart")
-    start.set(qn("w:id"), "0")
-    end = OxmlElement("w:commentRangeEnd")
-    end.set(qn("w:id"), "0")
-    ref_run = OxmlElement("w:r")
-    ref_rpr = OxmlElement("w:rPr")
-    ref_el = OxmlElement("w:commentReference")
-    ref_el.set(qn("w:id"), "0")
-    ref_rpr.append(ref_el)
-    ref_run.append(ref_rpr)
-    p_el = target._p
-    p_el.append(start)
-    p_el.append(end)
-    p_el.append(ref_run)
-
-    tracked = doc.add_paragraph()
-    ins = OxmlElement("w:ins")
-    ins.set(qn("w:id"), "1")
-    ins.set(qn("w:author"), "Author")
-    ins_run = OxmlElement("w:r")
-    ins_t = OxmlElement("w:t")
-    ins_t.text = "Inserted sentence"
-    ins_run.append(ins_t)
-    ins.append(ins_run)
-    tracked._p.append(ins)
-
-    dele = OxmlElement("w:del")
-    dele.set(qn("w:id"), "2")
-    dele.set(qn("w:author"), "Author")
-    del_run = OxmlElement("w:r")
-    del_text = OxmlElement("w:delText")
-    del_text.text = "Removed sentence"
-    del_run.append(del_text)
-    dele.append(del_run)
-    tracked._p.append(dele)
-
-    doc.save(path)
-    return path
-
-
-def make_pptx_charts(path: Path, *, slides: int = 2) -> Path:
-    """PPTX with a column chart and speaker notes on every slide."""
-    from pptx import Presentation
-    from pptx.chart.data import CategoryChartData
-    from pptx.enum.chart import XL_CHART_TYPE
-
-    prs = Presentation()
-    for index in range(1, slides + 1):
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = f"Quarterly Results {index}"
-        body = slide.placeholders[1]
-        body.text_frame.text = "Summary of quarterly performance."
-
-        chart_data = CategoryChartData()
-        chart_data.categories = ["Q1", "Q2", "Q3"]
-        chart_data.add_series("Revenue", (100 + index, 150 + index, 200 + index))
-        chart_data.add_series("Costs", (60 + index, 90 + index, 120 + index))
-        slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_CLUSTERED,
-            2 * 914400,
-            1 * 914400,
-            4 * 914400,
-            3 * 914400,
-            chart_data,
-        )
-
-        slide.notes_slide.notes_text_frame.text = f"Speaker notes for slide {index}."
-    prs.save(path)
-    return path
-
-
-def make_xlsx_charts(path: Path) -> Path:
-    """XLSX with a chart and a cell comment."""
-    from openpyxl import Workbook
-    from openpyxl.chart import BarChart, Reference
-    from openpyxl.comments import Comment
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Quarterly"
-    ws.append(["Quarter", "Revenue", "Costs"])
-    ws.append(["Q1", 100, 60])
-    ws.append(["Q2", 150, 90])
-    ws.append(["Q3", 200, 120])
-    ws["A2"].comment = Comment("Starts below expectations.", "Analyst")
-
-    chart = BarChart()
-    chart.title = "Revenue vs costs"
-    data = Reference(ws, min_col=2, max_col=3, min_row=1, max_row=4)
-    cats = Reference(ws, min_col=1, min_row=2, max_row=4)
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    ws.add_chart(chart, "F2")
-
-    wb.save(path)
-    return path
-
-
-def make_text_pdf_with_image(path: Path) -> Path:
-    """PDF containing an embedded image (used for asset extraction tests)."""
+def make_deck_pdf(path: Path, *, missions: int = 3) -> Path:
+    """A deck-style PDF: large-font mission titles, two-column pages,
+    one duplicated page (animation build) and one image-only page."""
     from io import BytesIO
 
     import pymupdf
     from PIL import Image
 
-    buffer = BytesIO()
-    Image.new("RGB", (64, 64), color=(200, 30, 30)).save(buffer, format="PNG")
-    buffer.seek(0)
     doc = pymupdf.open()
+    for mission in range(1, missions + 1):
+        page = doc.new_page()
+        page.insert_text((72, 60), f"Mission {mission}", fontsize=32)
+        for column, prefix in ((72, "Left"), (340, "Right")):
+            for line_index in range(3):
+                page.insert_text(
+                    (column, 110 + line_index * 24),
+                    f"{prefix} column line {line_index + 1} of mission {mission}",
+                    fontsize=12,
+                )
+    doc.insert_pdf(
+        pymupdf.open(stream=doc.tobytes(), filetype="pdf"),
+        from_page=missions - 1,
+        to_page=missions - 1,
+    )
+
     page = doc.new_page()
+    buffer = BytesIO()
+    Image.new("RGB", (400, 500), color=(240, 240, 240)).save(buffer, format="PNG")
+    buffer.seek(0)
     page.insert_image(page.rect, stream=buffer.read())
-    page.insert_text((72, 72), "Image page", fontsize=18)
+
     doc.save(path)
     doc.close()
     return path

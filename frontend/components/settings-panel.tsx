@@ -65,7 +65,6 @@ export function SettingsPanel({ settings, onChange, onSave, saving, compact }: S
 
   const toggles: { key: keyof UserSettings; label: string; description: string }[] = [
     { key: "preserve_boundaries", label: "Page / slide / sheet boundaries", description: "Keep `---` separators between pages, slides and sheets" },
-    { key: "extract_images", label: "Extract images", description: "Save images into assets/ and reference them" },
     { key: "convert_tables", label: "Convert tables to Markdown", description: "Render tables as Markdown tables" },
     { key: "preserve_links", label: "Preserve hyperlinks", description: "Keep links as [text](url)" },
   ];
@@ -88,7 +87,7 @@ export function SettingsPanel({ settings, onChange, onSave, saving, compact }: S
             onChange={(value) => set("output_mode", value as UserSettings["output_mode"])}
             options={[
               { value: "fidelity", label: "Fidelity", description: "Keeps pages, slides and sheets visible" },
-              { value: "clean", label: "Clean Markdown", description: "Flows content with fewer artifacts" },
+              { value: "clean", label: "Clean Markdown", description: "Flows content, no page/slide/sheet markers" },
             ]}
           />
         </fieldset>

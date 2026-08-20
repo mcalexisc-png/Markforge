@@ -31,7 +31,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { deleteJob, downloadUrl, getJob, getPreview, saveMarkdown, triggerDownload, zipUrl } from "@/lib/api";
+import { deleteJob, downloadFile, downloadUrl, getJob, getPreview, resetMarkdown, saveMarkdown, zipUrl } from "@/lib/api";
 import type { Job, JobFileState, Preview } from "@/lib/types";
 import { formatBytes } from "@/lib/utils";
 
@@ -58,7 +58,10 @@ export default function JobWorkspacePage() {
       const data = await getJob(jobId);
       setJob(data);
       setError(null);
-      if (!activeFileId && data.items.length > 0) setActiveFileId(data.items[0].file_id);
+      if (!activeFileId && data.items.length > 0) {
+        const preferred = data.items.find((i) => i.status === "completed" || i.status === "running");
+        setActiveFileId((preferred ?? data.items[0]).file_id);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load job");
     }
@@ -119,12 +122,22 @@ export default function JobWorkspacePage() {
   const handleReset = async () => {
     if (!preview) return;
     try {
-      const data = await getPreview(jobId, activeFileId ?? undefined);
+      const data = await resetMarkdown(jobId, activeFileId ?? undefined);
+      setPreview(data);
       setDraft(data.content);
       setDirty(false);
-      toast.success("Restored extracted content");
+      void refresh();
+      toast.success("Restored original extracted content");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to restore");
+    }
+  };
+
+  const handleDownload = async (url: string, filename: string) => {
+    try {
+      await downloadFile(url, filename);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed");
     }
   };
 
@@ -172,7 +185,7 @@ export default function JobWorkspacePage() {
           </div>
           {finished && job && (
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => triggerDownload(zipUrl(jobId), `markforge-${jobId}.zip`)}>
+              <Button variant="outline" size="sm" onClick={() => void handleDownload(zipUrl(jobId), `markforge-${jobId}.zip`)}>
                 <FileArchive className="h-4 w-4" /> Download ZIP
               </Button>
               <Button variant="ghost" size="sm" className="text-destructive" onClick={handleDelete} disabled={deleting}>
@@ -206,7 +219,13 @@ export default function JobWorkspacePage() {
                       key={item.file_id}
                       role="tab"
                       aria-selected={selected}
-                      onClick={() => setActiveFileId(item.file_id)}
+                      onClick={() => {
+                        if (dirty && item.file_id !== activeFileId) {
+                          const proceed = window.confirm("You have unsaved changes for the current file. Switch anyway?");
+                          if (!proceed) return;
+                        }
+                        setActiveFileId(item.file_id);
+                      }}
                       className={cn(
                         "flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
                         selected
@@ -230,7 +249,7 @@ export default function JobWorkspacePage() {
               item={active}
               previewLoading={previewLoading}
               finished={finished}
-              onDownload={() => triggerDownload(downloadUrl(jobId, activeFileId ?? undefined))}
+              onDownload={() => void handleDownload(downloadUrl(jobId, activeFileId ?? undefined), `${active?.filename.replace(/\.\w+$/, "") ?? "document"}.md`)}
             />
 
             {active?.status === "completed" && (
@@ -249,7 +268,7 @@ export default function JobWorkspacePage() {
                     </Tabs>
                     <div className="flex items-center gap-2">
                       {dirty && <span className="text-xs text-warning">Unsaved changes</span>}
-                      <Button variant="outline" size="sm" onClick={handleReset} disabled={saving || !dirty}>
+                      <Button variant="outline" size="sm" onClick={() => void handleReset()} disabled={saving || !(dirty || active?.edited)}>
                         <RotateCcw className="h-3.5 w-3.5" /> Reset
                       </Button>
                       <Button size="sm" onClick={handleSave} disabled={saving || !dirty}>
@@ -272,7 +291,7 @@ export default function JobWorkspacePage() {
                   <ResultSidebar
                     preview={preview}
                     loading={previewLoading}
-                    onDownload={() => triggerDownload(downloadUrl(jobId, activeFileId ?? undefined), `${active.filename.replace(/\.\w+$/, "")}.md`)}
+                    onDownload={() => void handleDownload(downloadUrl(jobId, activeFileId ?? undefined), `${active.filename.replace(/\.\w+$/, "")}.md`)}
                   />
                 </aside>
               </div>

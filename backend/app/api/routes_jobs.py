@@ -114,6 +114,34 @@ async def save_markdown(job_id: str, payload: MarkdownUpdate) -> None:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/{job_id}/reset", response_model=PreviewOut)
+async def reset_markdown(job_id: str, file_id: str | None = None) -> PreviewOut:
+    """Restore the original extraction, discarding any edits."""
+    job = _require_job(job_id)
+    item = job.items[0]
+    if file_id:
+        item = next((i for i in job.items if i.file_id == file_id), None)
+        if item is None:
+            raise HTTPException(status_code=404, detail="File not found in job.")
+    if item.status != "completed" or not item.output_dir:
+        raise HTTPException(status_code=409, detail="This file has no result yet.")
+    output_dir = Path(item.output_dir)
+    markdown_path = output_dir / (item.markdown_filename or "document.md")
+    original_path = output_dir / "document.original.md"
+    source = original_path if original_path.exists() else markdown_path
+    content = source.read_text(encoding="utf-8")
+    markdown_path.write_text(content, encoding="utf-8")
+    job_service.reset_edited(job_id, item.file_id)
+    return PreviewOut(
+        job_id=job_id,
+        filename=item.filename,
+        content=content,
+        stats=item.stats,
+        warnings=item.warnings,
+        ocr_used=item.ocr_used,
+    )
+
+
 @router.get("/{job_id}/download")
 async def job_download(job_id: str, file_id: str | None = None) -> FileResponse:
     job = _require_job(job_id)

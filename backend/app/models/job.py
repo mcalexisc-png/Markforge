@@ -49,7 +49,7 @@ class UploadedFile(Base):
     name: Mapped[str] = mapped_column(String(200))
     size: Mapped[int] = mapped_column(Integer, default=0)
     format: Mapped[str] = mapped_column(String(10))
-    sha256: Mapped[str] = mapped_column(String(64))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

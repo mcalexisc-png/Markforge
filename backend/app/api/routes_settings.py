@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter
 
 from app.core.db import SessionLocal
 from app.models.job import AppSetting
 from app.schemas.settings import DEFAULT_SETTINGS, UserSettings
+
+logger = logging.getLogger("markforge.settings")
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -19,7 +23,11 @@ def get_persisted() -> UserSettings:
         row = db.get(AppSetting, _KEY)
         if row is None or not row.value:
             return DEFAULT_SETTINGS.model_copy()
-        return UserSettings.model_validate_json(row.value)
+        try:
+            return UserSettings.model_validate_json(row.value)
+        except ValueError:
+            logger.warning("Persisted settings are corrupt; using defaults")
+            return DEFAULT_SETTINGS.model_copy()
     finally:
         db.close()
 

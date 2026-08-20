@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, FileClock, Lock, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, AlertCircle, FileClock, Lock, ShieldCheck, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Header } from "@/components/header";
 import { UploadDropzone } from "@/components/upload-dropzone";
@@ -11,10 +11,11 @@ import { SettingsPanel } from "@/components/settings-panel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { createJob, getHealth, getSettings, saveSettings, verifyLanPassword } from "@/lib/api";
+import { createJob, getSettings, saveSettings, verifyLanPassword, AuthRequiredError } from "@/lib/api";
 import type { UploadedFile, UserSettings } from "@/lib/types";
 import { formatBytes, formatDate } from "@/lib/utils";
 import { useHistory } from "@/hooks/use-history";
@@ -24,7 +25,6 @@ const DEFAULT_SETTINGS: UserSettings = {
   output_mode: "fidelity",
   ocr_mode: "auto",
   preserve_boundaries: true,
-  extract_images: true,
   convert_tables: true,
   preserve_links: true,
 };
@@ -38,25 +38,27 @@ export default function DashboardPage() {
   const [locked, setLocked] = React.useState(false);
   const [password, setPassword] = React.useState("");
   const [authError, setAuthError] = React.useState("");
-  const [authChecking, setAuthChecking] = React.useState(true);
-  const { history, refresh } = useHistory(4);
+  const { history, loading: historyLoading, error: historyError, refresh } = useHistory(4);
 
-  usePolling(refresh, 10_000, { enabled: history.length === 0 });
+  const readyFiles = files.filter((f) => !f.duplicate_of);
+
+  usePolling(refresh, 10_000, { enabled: history.length === 0 && !historyError });
 
   React.useEffect(() => {
     void (async () => {
       try {
-        const health = await getHealth();
-        if (health.lan.auth_required) {
+        if (window.location.search.includes("locked=1")) {
+          setLocked(true);
+          return;
+        }
+        const stored = await getSettings();
+        setSettings(stored);
+      } catch (error) {
+        if (error instanceof AuthRequiredError) {
           setLocked(true);
         } else {
-          const stored = await getSettings();
-          setSettings(stored);
+          toast.error(error instanceof Error ? error.message : "Could not reach the conversion service.");
         }
-      } catch {
-        setLocked(true);
-      } finally {
-        setAuthChecking(false);
       }
     })();
   }, []);
@@ -66,25 +68,33 @@ export default function DashboardPage() {
     try {
       await verifyLanPassword(password);
       setLocked(false);
+      setPassword("");
       const stored = await getSettings();
       setSettings(stored);
       toast.success("Access granted");
-    } catch {
-      setAuthError("Incorrect password. Try again.");
+    } catch (error) {
+      if (error instanceof AuthRequiredError) {
+        setAuthError("Incorrect password. Try again.");
+      } else if (error instanceof Error && error.message.includes("Too many attempts")) {
+        setAuthError("Too many attempts. Please wait a minute and try again.");
+      } else {
+        setAuthError("Could not reach the service. Check your connection and try again.");
+      }
     }
   };
 
   const handleConvert = async () => {
-    if (files.length === 0) {
+    if (readyFiles.length === 0) {
       toast.error("Add at least one file first.");
       return;
     }
     setConverting(true);
     try {
-      const job = await createJob(files.map((f) => f.id), settings);
+      const job = await createJob(readyFiles.map((f) => f.id), settings);
       router.push(`/jobs/${job.id}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to start conversion");
+    } finally {
       setConverting(false);
     }
   };
@@ -138,15 +148,15 @@ export default function DashboardPage() {
               <p className="text-xs text-muted-foreground">
                 {files.length === 0
                   ? "Upload one or more documents to begin."
-                  : `${files.length} file${files.length > 1 ? "s" : ""} ready · ${formatBytes(files.reduce((sum, f) => sum + f.size, 0))}`}
+                  : `${readyFiles.length} file${readyFiles.length > 1 ? "s" : ""} ready · ${formatBytes(files.reduce((sum, f) => sum + f.size, 0))}`}
               </p>
               <Button
                 size="lg"
-                disabled={files.length === 0 || converting}
+                disabled={readyFiles.length === 0 || converting}
                 onClick={handleConvert}
                 className="w-full sm:w-auto"
               >
-                {converting ? "Starting…" : files.length > 1 ? `Convert all (${files.length})` : "Convert to Markdown"}
+                {converting ? "Starting…" : readyFiles.length > 1 ? `Convert all (${readyFiles.length})` : "Convert to Markdown"}
                 {!converting && <ArrowRight className="h-4 w-4" />}
               </Button>
             </div>
@@ -170,7 +180,26 @@ export default function DashboardPage() {
             </Link>
           </div>
 
-          {history.length === 0 ? (
+          {historyLoading && history.length === 0 ? (
+            <Card>
+              <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+                {[0, 1].map((i) => (
+                  <Skeleton key={i} className="h-14 w-full" />
+                ))}
+              </CardContent>
+            </Card>
+          ) : historyError ? (
+            <Card>
+              <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+                <AlertCircle className="h-8 w-8 text-destructive" />
+                <p className="text-sm font-medium">Couldn&apos;t load your conversions</p>
+                <p className="max-w-sm text-sm text-muted-foreground">{historyError}</p>
+                <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                  Retry
+                </Button>
+              </CardContent>
+            </Card>
+          ) : history.length === 0 ? (
             <Card>
               <CardContent className="flex flex-col items-center gap-2 py-10 text-center">
                 <FileClock className="h-8 w-8 text-muted-foreground/60" />
@@ -214,9 +243,8 @@ export default function DashboardPage() {
         </section>
       </main>
 
-      <Dialog open={locked} onOpenChange={(open) => !open && !authChecking && setLocked(false)}>
+      <Dialog open={locked} onOpenChange={() => {}}>
         <DialogContent>
-          <DialogClose aria-label="Close" />
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Lock className="h-4 w-4 text-primary" />

@@ -68,6 +68,7 @@ class ConversionContext:
         self.progress_cb = progress_cb
         self.ocr_used = False
         self.ocr_texts: dict[int, str] = {}
+        self.markdown_output: str | None = None
         self._seen_assets: dict[str, str] = {}
 
     def progress(self, phase: str, current: int = 0, total: int = 0, message: str = "") -> None:
@@ -77,10 +78,10 @@ class ConversionContext:
     def save_image(self, data: bytes, ext: str, alt: str = "") -> str | None:
         """Write an extracted image to the assets directory (deduplicated).
 
-        Returns the relative path (``assets/name.ext``) or None when images are
-        disabled.
+        Returns the relative path (``assets/name.ext``) or None when there is
+        no image data.
         """
-        if not self.settings.extract_images or not data:
+        if not data:
             return None
         digest = hashlib.sha256(data).hexdigest()[:16]
         if digest in self._seen_assets:

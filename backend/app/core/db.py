@@ -48,6 +48,10 @@ def init_db() -> None:
     from app.models import job  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_uploaded_files_sha256 ON uploaded_files (sha256)"
+        )
 
 def get_db():
     db = SessionLocal()

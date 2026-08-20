@@ -6,10 +6,16 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, UploadFile
 
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models.job import UploadedFile
 from app.schemas.job import UploadedFile as UploadedFileOut
-from app.services.files import UploadValidationError, store_upload, validate_upload
+from app.services.files import (
+    UploadValidationError,
+    read_upload_limited,
+    store_upload,
+    validate_upload,
+)
 from app.services.storage import job_upload_dir as upload_dir
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -18,13 +24,18 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 @router.post("/upload", response_model=list[UploadedFileOut])
 async def upload_files(files: list[UploadFile]) -> list[UploadedFileOut]:
     """Upload one or more documents for a conversion job."""
+    if len(files) > settings.max_files_per_job:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A job can contain at most {settings.max_files_per_job} files.",
+        )
     records: list[UploadedFileOut] = []
     db = SessionLocal()
     try:
         for file in files:
             filename = file.filename or ""
-            data = await file.read()
             try:
+                data = await read_upload_limited(file)
                 validate_upload(filename, len(data), data)
             except UploadValidationError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc

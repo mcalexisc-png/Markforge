@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     job_mode: str = "sync"
     redis_url: str = "redis://localhost:6379/0"
     job_timeout: int = 900
+    max_concurrent_jobs: int = 2
     worker_concurrency: int = 2
 
     storage_dir: str = "storage"

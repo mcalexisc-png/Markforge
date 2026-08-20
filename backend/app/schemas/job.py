@@ -37,6 +37,7 @@ class JobFileState(BaseModel):
     output_dir: str | None = None
     markdown_filename: str | None = None
     ocr_used: bool = False
+    edited: bool = False
     error: dict[str, Any] | None = None
 
 

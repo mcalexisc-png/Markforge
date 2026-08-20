@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.db import SessionLocal
+from app.models.job import Job, UploadedFile
 
 
 def ensure_dirs() -> None:
@@ -61,8 +64,39 @@ def dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
+def _job_is_terminal(job_id: str) -> bool:
+    """A job is safe to delete only when it is finished (or no longer tracked)."""
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            return True
+        return job.status in ("completed", "partial", "failed")
+    finally:
+        db.close()
+
+
+def _newest_mtime(root: Path) -> datetime:
+    """Newest modification time across a directory and all its files.
+
+    Editing ``document.md`` refreshes the file but not the parent directory,
+    so retention must look at descendants or it can delete output the user is
+    still working on.
+    """
+    newest = root.stat().st_mtime
+    for entry in root.rglob("*"):
+        try:
+            newest = max(newest, entry.stat().st_mtime)
+        except OSError:
+            continue
+    return datetime.fromtimestamp(newest, tz=UTC)
+
+
 def run_retention(now: datetime | None = None) -> tuple[int, int]:
     """Delete finished job outputs older than the retention period.
+
+    Outputs belonging to queued or running jobs are always kept, as are
+    outputs whose newest file (e.g. an edited ``document.md``) is recent.
 
     Returns (deleted_output_dirs, freed_bytes).
     """
@@ -74,12 +108,43 @@ def run_retention(now: datetime | None = None) -> tuple[int, int]:
     for job_dir in output_root.iterdir() if output_root.exists() else []:
         if not job_dir.is_dir():
             continue
-        mtime = datetime.fromtimestamp(job_dir.stat().st_mtime, tz=UTC)
-        if mtime < cutoff:
+        if not _job_is_terminal(job_dir.name):
+            continue
+        if _newest_mtime(job_dir) < cutoff:
             freed += dir_size(job_dir)
             shutil.rmtree(job_dir, ignore_errors=True)
             deleted += 1
+    prune_uploaded_files()
     return deleted, freed
+
+
+def prune_uploaded_files() -> int:
+    """Drop upload rows whose originals no longer exist on disk.
+
+    ``cleanup_upload`` removes the files but not the rows, so they would
+    accumulate forever; rows for files still on disk are kept so re-uploads
+    can be deduplicated.
+    """
+    db = SessionLocal()
+    try:
+        referenced: set[str] = set()
+        for job in db.query(Job).all():
+            try:
+                referenced.update(f["id"] for f in json.loads(job.files_json or "[]"))
+            except (ValueError, TypeError):
+                continue
+        upload_root = settings.resolve_upload_dir()
+        removed = 0
+        for row in db.query(UploadedFile).all():
+            if row.id in referenced:
+                continue
+            if not (upload_root / row.id).exists():
+                db.delete(row)
+                removed += 1
+        db.commit()
+        return removed
+    finally:
+        db.close()
 
 
 def cleanup_temp(now: datetime | None = None) -> int:

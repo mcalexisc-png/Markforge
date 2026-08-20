@@ -7,7 +7,11 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.security import safe_filename, sha256_of_bytes
 from app.services.storage import job_upload_dir
-from converters.registry import ALLOWED_EXTENSIONS
+from converters import ALLOWED_EXTENSIONS
+
+_RESERVED_STEMS = {"CON", "PRN", "AUX", "NUL"} | {
+    f"COM{i}" for i in range(1, 10)
+} | {f"LPT{i}" for i in range(1, 10)}
 
 _SIGNS: list[tuple[str, bytes]] = [
     ("pdf", b"%PDF"),
@@ -47,6 +51,26 @@ class UploadValidationError(ValueError):
         self.code = code
 
 
+async def read_upload_limited(upload) -> bytes:
+    """Read an UploadFile into memory, aborting once it exceeds the size cap.
+
+    The cap is enforced *during* the read so a huge body can never be fully
+    buffered by the server.
+    """
+    limit = settings.max_file_size
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await upload.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise UploadValidationError(
+                f"This file exceeds the {limit // (1024 * 1024)} MB size limit.",
+                "file_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def validate_upload(filename: str, size: int, first_bytes: bytes) -> str:
     """Validate an upload and return its detected format."""
     if not filename or "\x00" in filename:
@@ -60,12 +84,18 @@ def validate_upload(filename: str, size: int, first_bytes: bytes) -> str:
             "unsupported_type",
         )
 
+    stem = Path(filename).stem.upper().rstrip(" .")
+    if stem in _RESERVED_STEMS:
+        raise UploadValidationError(
+            "This filename is reserved by the operating system and cannot be used.",
+            "invalid_filename",
+        )
+
     if size > settings.max_file_size:
         mb = settings.max_file_size // (1024 * 1024)
         raise UploadValidationError(
             f"This file exceeds the {mb} MB size limit.", "file_too_large"
         )
-
     declared = ext.lstrip(".")
     magic = _magic_format(first_bytes)
     if magic is None:

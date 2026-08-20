@@ -10,6 +10,14 @@ import { toast } from "sonner";
 
 const ACCEPTED = [".pdf", ".docx", ".pptx", ".xlsx"];
 
+const MAX_FILE_MB = 100;
+const MAX_FILES = 25;
+
+function extensionOf(name: string): string {
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index).toLowerCase() : "";
+}
+
 const formatMeta: Record<string, { icon: typeof FileText; label: string; color: string }> = {
   pdf: { icon: FileText, label: "PDF", color: "text-red-500/80 dark:text-red-400/80" },
   docx: { icon: FileText, label: "DOCX", color: "text-blue-500/80 dark:text-blue-400/80" },
@@ -37,9 +45,29 @@ export function UploadDropzone({ files, onFilesAdded, onRemove, onClear }: Dropz
   const handleFiles = async (list: FileList | File[]) => {
     const incoming = Array.from(list);
     if (incoming.length === 0) return;
+
+    const badType = incoming.filter((f) => !ACCEPTED.includes(extensionOf(f.name)));
+    const oversized = incoming.filter((f) => f.size > MAX_FILE_MB * 1024 * 1024);
+    let valid = incoming.filter((f) => ACCEPTED.includes(extensionOf(f.name)) && f.size <= MAX_FILE_MB * 1024 * 1024);
+
+    const remaining = Math.max(0, MAX_FILES - files.length);
+    if (valid.length > remaining) {
+      toast.error(`You can convert at most ${MAX_FILES} files per job.`);
+      valid = valid.slice(0, remaining);
+    }
+    if (badType.length > 0) {
+      toast.error(
+        `${badType.length} file${badType.length > 1 ? "s" : ""} skipped — only PDF, DOCX, PPTX and XLSX are supported.`,
+      );
+    }
+    if (oversized.length > 0) {
+      toast.error(`${oversized.length} file${oversized.length > 1 ? "s" : ""} skipped — files must be ${MAX_FILE_MB} MB or smaller.`);
+    }
+    if (valid.length === 0) return;
+
     setUploading(true);
     try {
-      const records = await uploadFiles(incoming);
+      const records = await uploadFiles(valid);
       onFilesAdded(records);
       const dupes = records.filter((r) => r.duplicate_of);
       if (dupes.length > 0) {

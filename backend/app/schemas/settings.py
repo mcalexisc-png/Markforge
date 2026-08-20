@@ -13,7 +13,6 @@ class ConversionSettings(BaseModel):
     output_mode: Literal["fidelity", "clean"] = "fidelity"
     ocr_mode: Literal["auto", "always", "never"] = "auto"
     preserve_boundaries: bool = True
-    extract_images: bool = True
     convert_tables: bool = True
     preserve_links: bool = True
 
@@ -24,7 +23,6 @@ class UserSettings(BaseModel):
     output_mode: Literal["fidelity", "clean"] = "fidelity"
     ocr_mode: Literal["auto", "always", "never"] = "auto"
     preserve_boundaries: bool = True
-    extract_images: bool = True
     convert_tables: bool = True
     preserve_links: bool = True
 

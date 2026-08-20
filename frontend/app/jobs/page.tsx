@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { deleteJob, getHistory, triggerDownload, zipUrl } from "@/lib/api";
+import { deleteJob, downloadFile, getHistory, zipUrl } from "@/lib/api";
 import type { HistoryItem } from "@/lib/types";
 import { cn, formatBytes, formatDate } from "@/lib/utils";
 
@@ -120,7 +120,11 @@ export default function HistoryPage() {
                         variant="ghost"
                         size="icon-sm"
                         aria-label={`Download ZIP for ${item.filename}`}
-                        onClick={() => triggerDownload(zipUrl(item.id), `markforge-${item.id}.zip`)}
+                        onClick={() => {
+                        void downloadFile(zipUrl(item.id), `markforge-${item.id}.zip`).catch((error) =>
+                          toast.error(error instanceof Error ? error.message : "Download failed"),
+                        );
+                      }}
                       >
                         <FileArchive className="h-4 w-4" />
                       </Button>

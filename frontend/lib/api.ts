@@ -2,10 +2,17 @@ import type { HealthInfo, HistoryItem, Job, Preview, UploadedFile, UserSettings 
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
+export class AuthRequiredError extends Error {
+  constructor() {
+    super("Authorization required");
+    this.name = "AuthRequiredError";
+  }
+}
+
 async function parse<T>(response: Response): Promise<T> {
   if (response.status === 401) {
     window.dispatchEvent(new CustomEvent("markforge:unauthorized"));
-    throw new Error("Authorization required");
+    throw new AuthRequiredError();
   }
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
@@ -18,6 +25,25 @@ async function parse<T>(response: Response): Promise<T> {
     throw new Error(detail);
   }
   return response.json() as Promise<T>;
+}
+
+async function parseVoid(response: Response): Promise<void> {
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent("markforge:unauthorized"));
+    throw new AuthRequiredError();
+  }
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      /* keep generic message */
+    }
+    throw new Error(detail);
+  }
+  if (response.status === 204) return;
+  await response.body?.cancel();
 }
 
 export async function uploadFiles(files: File[]): Promise<UploadedFile[]> {
@@ -51,10 +77,12 @@ export async function saveMarkdown(id: string, content: string, fileId?: string)
     headers: JSON_HEADERS,
     body: JSON.stringify({ content, file_id: fileId }),
   });
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(body?.detail || "Failed to save");
-  }
+  await parseVoid(response);
+}
+
+export async function resetMarkdown(id: string, fileId?: string): Promise<Preview> {
+  const suffix = fileId ? `?file_id=${fileId}` : "";
+  return parse<Preview>(await fetch(`/api/jobs/${id}/reset${suffix}`, { method: "POST" }));
 }
 
 export async function getHistory(): Promise<HistoryItem[]> {
@@ -63,10 +91,7 @@ export async function getHistory(): Promise<HistoryItem[]> {
 
 export async function deleteJob(id: string): Promise<void> {
   const response = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(body?.detail || "Failed to delete");
-  }
+  await parseVoid(response);
 }
 
 export async function getSettings(): Promise<UserSettings> {
@@ -103,11 +128,29 @@ export function zipUrl(jobId: string): string {
   return `/api/jobs/${jobId}/zip`;
 }
 
-export function triggerDownload(url: string, filename?: string) {
+export async function downloadFile(url: string, filename: string): Promise<void> {
+  const response = await fetch(url);
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent("markforge:unauthorized"));
+    throw new AuthRequiredError();
+  }
+  if (!response.ok) {
+    let detail = `Download failed (${response.status})`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      /* keep generic message */
+    }
+    throw new Error(detail);
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
-  anchor.href = url;
-  if (filename) anchor.download = filename;
+  anchor.href = objectUrl;
+  anchor.download = filename;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }

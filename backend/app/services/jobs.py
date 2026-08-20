@@ -16,6 +16,8 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fastapi import HTTPException
+
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.security import safe_stem
@@ -25,11 +27,13 @@ from app.schemas.settings import ConversionSettings
 from app.services import storage
 from app.services.storage import job_output_dir, job_upload_dir
 from converters.base import ConversionContext, ConversionError
-from converters.registry import create_converter
 from markdown.cleanup import postprocess
-from markdown.renderer import render_document
 
 logger = logging.getLogger("markforge.jobs")
+
+_job_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_jobs))
+
+_MIN_TIMEOUT = 30
 
 
 def _now() -> datetime:
@@ -122,7 +126,15 @@ def to_job_out(job: Job) -> JobOut:
         status=job.status,
         progress=job.progress,
         phase=job.phase,
-        files=[{"id": f["id"], "name": f["name"], "size": f["size"], "format": f["format"]} for f in files],
+        files=[
+            {
+                "id": f.get("id", ""),
+                "name": f.get("name", "file"),
+                "size": f.get("size", 0),
+                "format": f.get("format", ""),
+            }
+            for f in files
+        ],
         items=[JobFileState(**item) for item in items],
         settings=json.loads(job.settings_json or "{}"),
         error=error,
@@ -140,8 +152,20 @@ def dispatch_job(job_id: str) -> None:
         celery_app.send_task("markforge.process_job", args=[job_id])
         logger.info("Dispatched job %s to Celery", job_id)
     else:
-        threading.Thread(target=process_job, args=[job_id], daemon=True).start()
+        if not _job_slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=409,
+                detail="Too many conversions are already running. Please wait a moment and try again.",
+            )
+        threading.Thread(target=_run_job_with_slot, args=[job_id], daemon=True).start()
         logger.info("Dispatched job %s in-process", job_id)
+
+
+def _run_job_with_slot(job_id: str) -> None:
+    try:
+        process_job(job_id)
+    finally:
+        _job_slots.release()
 
 
 # --------------------------------------------------------------------- #
@@ -171,14 +195,16 @@ def process_job(job_id: str) -> None:
     completed = 0
     failed = 0
     settings_dict = json.loads(job.settings_json or "{}")
+    used_stems: set[str] = set()
 
     for item in items:
-        item_status = _process_item(job_id, item, settings_dict)
+        item_status = _process_item(job_id, item, settings_dict, used_stems)
         if item_status == "completed":
             completed += 1
         else:
             failed += 1
 
+    final_status = "failed"
     db = SessionLocal()
     try:
         tracked = db.get(Job, job_id)
@@ -194,10 +220,13 @@ def process_job(job_id: str) -> None:
         tracked.progress = 100.0 if tracked.status == "completed" else tracked.progress
         tracked.phase = "Completed" if tracked.status in ("completed", "partial") else "Failed"
         tracked.finished_at = _now()
+        final_status = tracked.status
         _save_job(db, tracked, final_items)
         # Originals are no longer needed once processing is done.
         for item in final_items:
             cleanup_upload(item["file_id"], exclude_job=job_id)
+    except Exception:
+        logger.exception("Failed to finalize job %s", job_id)
     finally:
         db.close()
 
@@ -205,20 +234,27 @@ def process_job(job_id: str) -> None:
     logger.info(
         "Job %s finished: %s (%d ok, %d failed) in %.1fs",
         job_id,
-        tracked.status,
+        final_status,
         completed,
         failed,
         elapsed,
     )
 
 
-def _process_item(job_id: str, item: dict, settings_dict: dict) -> str:
+def _process_item(job_id: str, item: dict, settings_dict: dict, used_stems: set[str] | None = None) -> str:
     file_id = item["file_id"]
     filename = item["filename"]
     conversion_settings = ConversionSettings(**settings_dict)
 
     output_root = job_output_dir(job_id)
     stem = safe_stem(filename)
+    if used_stems is not None:
+        base = stem
+        counter = 2
+        while stem in used_stems:
+            stem = f"{base}-{counter}"
+            counter += 1
+        used_stems.add(stem)
     output_dir = output_root / stem
     output_dir.mkdir(parents=True, exist_ok=True)
     item["output_dir"] = str(output_dir)
@@ -250,23 +286,16 @@ def _process_item(job_id: str, item: dict, settings_dict: dict) -> str:
     _update_item(job_id, item)
 
     try:
-        document = _convert_with_timeout(context)
-        if conversion_settings.output_mode == "fidelity":
-            markdown = render_document(
-                document,
-                output_mode="fidelity",
-                preserve_boundaries=conversion_settings.preserve_boundaries,
-            )
-        else:
-            markdown = render_document(
-                document,
-                output_mode="clean",
-                preserve_boundaries=False,
-            )
+        document = _convert_markitdown(context)
+        markdown = context.markdown_output or ""
         markdown = postprocess(markdown, output_mode=conversion_settings.output_mode)
 
         markdown_path = output_dir / "document.md"
         markdown_path.write_text(markdown, encoding="utf-8")
+
+        original_path = output_dir / "document.original.md"
+        if not original_path.exists():
+            original_path.write_text(markdown, encoding="utf-8")
 
         warnings = [w for w in document.warnings if isinstance(w, dict)] or [
             {"code": w.code, "message": w.message, "detail": w.detail, "severity": w.severity}
@@ -294,33 +323,43 @@ def _process_item(job_id: str, item: dict, settings_dict: dict) -> str:
         item["error"] = {"code": exc.code, "message": exc.message, "detail": exc.detail}
         _update_item(job_id, item)
         return "failed"
-    except Exception as exc:  # never let one file take down the job
+    except Exception:  # never let one file take down the job
         logger.exception("Unexpected conversion failure for %s", filename)
         item["status"] = "failed"
         item["error"] = {
             "code": "conversion_failed",
             "message": "We couldn't extract the contents of this file.",
-            "detail": str(exc)[:500],
         }
         _update_item(job_id, item)
         return "failed"
 
 
-def _convert_with_timeout(context: ConversionContext):
-    """Run the converter, aborting after the configured timeout."""
-    timeout = max(30, settings.job_timeout)
+def _convert_markitdown(context: ConversionContext):
+    """Run the MarkItDown engine, aborting after the configured timeout."""
+    from converters.markitdown import convert_with_markitdown
 
-    def run() -> object:
-        converter = create_converter(context)
-        return converter.convert()
+    return _run_with_timeout(lambda: convert_with_markitdown(context))
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(run)
-        try:
-            return future.result(timeout=timeout)
-        except FutureTimeout:
-            future.cancel()
-            raise
+
+def _run_with_timeout(fn):
+    """Execute ``fn`` in a worker thread, aborting after the configured timeout.
+
+    A timed-out thread cannot be killed; it is simply abandoned (the job is
+    marked failed) and its executor is shut down without waiting so the
+    caller never blocks on the hung conversion.
+    """
+    timeout = max(_MIN_TIMEOUT, settings.job_timeout)
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(fn)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeout:
+        future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=False)
 
 
 # --------------------------------------------------------------------- #
@@ -389,7 +428,9 @@ def save_markdown(job_id: str, file_id: str | None, content: str) -> None:
         item = None
         if file_id:
             item = next((i for i in items if i["file_id"] == file_id), None)
-        if item is None:
+            if item is None:
+                raise ValueError("File not found in job.")
+        else:
             item = next((i for i in items if i.get("status") == "completed"), None)
         if item is None:
             raise ValueError("File not found in job.")
@@ -400,6 +441,24 @@ def save_markdown(job_id: str, file_id: str | None, content: str) -> None:
             raise ValueError("Result file missing.")
         markdown_path.write_text(content, encoding="utf-8")
         item["edited"] = True
+        job.items_json = json.dumps(items, ensure_ascii=False)
+        db.commit()
+    finally:
+        db.close()
+
+
+def reset_edited(job_id: str, file_id: str) -> None:
+    """Clear the edited flag after a reset (content is restored by the route)."""
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            return
+        items = json.loads(job.items_json or "[]")
+        for existing in items:
+            if existing["file_id"] == file_id:
+                existing["edited"] = False
+                break
         job.items_json = json.dumps(items, ensure_ascii=False)
         db.commit()
     finally:

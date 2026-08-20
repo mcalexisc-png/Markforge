@@ -38,6 +38,7 @@ export interface JobFileState {
   output_dir: string | null;
   markdown_filename: string | null;
   ocr_used: boolean;
+  edited: boolean;
   error: { code: string; message: string; detail?: string | null } | null;
 }
 
@@ -80,7 +81,6 @@ export interface UserSettings {
   output_mode: OutputMode;
   ocr_mode: OcrMode;
   preserve_boundaries: boolean;
-  extract_images: boolean;
   convert_tables: boolean;
   preserve_links: boolean;
 }
