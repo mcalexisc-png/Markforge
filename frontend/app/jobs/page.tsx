@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, FileArchive, FileClock, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Header } from "@/components/header";
 import { formatIcon } from "@/components/upload-dropzone";
 import { Badge } from "@/components/ui/badge";
@@ -26,8 +27,10 @@ const statusVariant = (status: HistoryItem["status"]) =>
 
 export default function HistoryPage() {
   const router = useRouter();
-  const [items, setItems] = React.useState<HistoryItem[]>([]);
+const [items, setItems] = React.useState<HistoryItem[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [deleting, setDeleting] = React.useState(false);
+  const [pendingDelete, setPendingDelete] = React.useState<{ id: string; filename: string } | null>(null);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -45,13 +48,23 @@ export default function HistoryPage() {
   }, [refresh]);
 
   const handleDelete = async (id: string, filename: string) => {
+    setDeleting(true);
     try {
       await deleteJob(id);
       setItems((prev) => prev.filter((i) => i.id !== id));
       toast.success(`Deleted "${filename}"`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to delete");
+    } finally {
+      setDeleting(false);
     }
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    const { id, filename } = pendingDelete;
+    setPendingDelete(null);
+    await handleDelete(id, filename);
   };
 
   return (
@@ -134,7 +147,7 @@ export default function HistoryPage() {
                       size="icon-sm"
                       aria-label={`Delete ${item.filename}`}
                       className="text-muted-foreground hover:text-destructive"
-                      onClick={() => handleDelete(item.id, item.filename)}
+                      onClick={() => setPendingDelete({ id: item.id, filename: item.filename })}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -152,6 +165,18 @@ export default function HistoryPage() {
             })}
           </ul>
         )}
+
+        <ConfirmDialog
+          open={pendingDelete !== null}
+          onOpenChange={(open) => {
+            if (!open && !deleting) setPendingDelete(null);
+          }}
+          title="Delete this conversion?"
+          description={`This permanently removes "${pendingDelete?.filename ?? "this conversion"}" and all of its outputs from this machine. This cannot be undone.`}
+          confirmLabel="Delete"
+          busy={deleting}
+          onConfirm={() => void confirmDelete()}
+        />
       </main>
     </div>
   );

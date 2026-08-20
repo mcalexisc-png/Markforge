@@ -132,6 +132,18 @@ class TestMarkitdownEngine:
         assert "ocr_unavailable" in codes
         assert not context.ocr_used
 
+    def test_ocr_unavailable_warning_when_package_missing(self, tmp_path: Path, monkeypatch):
+        import converters.markitdown as mod
+
+        monkeypatch.setattr(mod, "tesseract_available", lambda: True)
+        monkeypatch.setattr(mod, "_ocrmypdf_importable", lambda: False)
+        source = make_scanned_pdf(tmp_path / "scan-missing-pkg.pdf")
+        context = make_context(source, tmp_path, ocr_mode="auto")
+        doc = convert_with_markitdown(context)
+        codes = [w.code for w in doc.warnings]
+        assert "ocr_unavailable" in codes
+        assert not context.ocr_used
+
     def test_ocr_prepass_runs_when_available(self, tmp_path: Path):
         from app.services.ocr import tesseract_available
 

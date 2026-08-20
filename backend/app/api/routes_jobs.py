@@ -164,8 +164,13 @@ async def job_download(job_id: str, file_id: str | None = None) -> FileResponse:
 
 
 @router.get("/{job_id}/zip")
-async def job_zip(job_id: str) -> FileResponse:
+def job_zip(job_id: str) -> FileResponse:
     job = _require_job(job_id)
+    if job.status not in ("completed", "partial"):
+        raise HTTPException(
+            status_code=409,
+            detail="The job is still running; results are not ready to package.",
+        )
     if not any(i.status == "completed" for i in job.items):
         raise HTTPException(status_code=409, detail="No completed results to package.")
     zip_path = build_results_zip(job_id, [i.model_dump() for i in job.items])

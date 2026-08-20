@@ -15,6 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 _DEFAULT_SECRET = "dev-only-change-me"
+_PLACEHOLDER_SECRETS = {"", "changeme", "change-me", "change_me"}
 
 
 class Settings(BaseSettings):
@@ -58,7 +59,10 @@ class Settings(BaseSettings):
 
     @property
     def secret_is_default(self) -> bool:
-        return not self.secret_key or self.secret_key == _DEFAULT_SECRET
+        value = self.secret_key.strip()
+        if value in _PLACEHOLDER_SECRETS or value == _DEFAULT_SECRET:
+            return True
+        return bool("change" in value.lower() or len(value) < 16)
 
     def _resolve(self, raw: str) -> Path:
         path = Path(raw)

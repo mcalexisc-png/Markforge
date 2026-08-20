@@ -388,9 +388,48 @@ class TestHistoryAndSettings:
         assert body["lan"]["enabled"] is False
 
     def test_duplicate_upload_deduped(self, client, tmp_path):
-        source = upload_from(make_pdf, tmp_path, "dup.pdf")
+        source = make_pdf(tmp_path / "dup.pdf", title="Dedupe Collision Test")
         data = source.read_bytes()
         first = client.post("/api/files/upload", files=[("files", ("dup.pdf", data))])
         second = client.post("/api/files/upload", files=[("files", ("dup.pdf", data))])
         assert first.json()[0]["id"] == second.json()[0]["id"]
         assert second.json()[0]["duplicate_of"] == first.json()[0]["id"]
+
+
+class TestZipEndpoint:
+    def test_zip_rejected_while_job_running(self, client, tmp_path):
+        from app.core.db import SessionLocal
+        from app.models.job import Job
+
+        file_id = upload(client, "zr.pdf", upload_from(make_pdf, tmp_path, "zr.pdf"))["id"]
+        job = run_job(client, [file_id])
+        db = SessionLocal()
+        try:
+            job_row = db.get(Job, job["id"])
+            job_row.status = "running"
+            db.commit()
+        finally:
+            db.close()
+        response = client.get(f"/api/jobs/{job['id']}/zip")
+        assert response.status_code == 409
+        assert "still running" in response.json()["detail"]
+
+    def test_zip_reused_when_results_unchanged(self, client, tmp_path):
+        from app.services.storage import job_output_dir
+
+        file_id = upload(client, "zu.pdf", upload_from(make_pdf, tmp_path, "zu.pdf"))["id"]
+        job = run_job(client, [file_id])
+        job_id = job["id"]
+        zip_path = job_output_dir(job_id) / f"markforge-{job_id}.zip"
+
+        assert client.get(f"/api/jobs/{job_id}/zip").status_code == 200
+        first_mtime = zip_path.stat().st_mtime_ns
+
+        assert client.get(f"/api/jobs/{job_id}/zip").status_code == 200
+        assert client.get(f"/api/jobs/{job_id}/zip").status_code == 200
+        assert zip_path.stat().st_mtime_ns == first_mtime, "unchanged results must reuse the existing archive"
+
+        edited = client.get(f"/api/jobs/{job_id}/preview").json()["content"] + "\n# touched\n"
+        assert client.put(f"/api/jobs/{job_id}/markdown", json={"content": edited}).status_code == 204
+        assert client.get(f"/api/jobs/{job_id}/zip").status_code == 200
+        assert zip_path.stat().st_mtime_ns > first_mtime, "edited results must refresh the archive"

@@ -6,10 +6,58 @@ tests are self-contained and runnable offline.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+_FIXED_DATETIME = (2024, 1, 1, 0, 0, 0)
+_FIXED_PDF_DATE = "D:20240101000000Z"
+_FIXED_PY_DATETIME = datetime(2024, 1, 1, 0, 0, 0)
 
-def make_pdf(path: Path, *, pages: int = 3, scanned: bool = False) -> Path:
+
+def _normalize_zip_timestamps(path: Path, *, date_time=_FIXED_DATETIME) -> Path:
+    """Rewrite ZIP entry timestamps and core-property dates so archives are
+    byte-for-byte reproducible (openpyxl embeds the current time on save)."""
+    import re
+    import zipfile
+
+    fixed_date = b"2024-01-01T00:00:00Z"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with zipfile.ZipFile(path, "r") as src, zipfile.ZipFile(
+        tmp, "w", zipfile.ZIP_DEFLATED
+    ) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "docProps/core.xml":
+                data = re.sub(
+                    rb"(<dcterms:(?:created|modified)[^>]*>)[^<]*(</dcterms:(?:created|modified)>)",
+                    rb"\g<1>" + fixed_date + rb"\g<2>",
+                    data,
+                )
+            new_info = zipfile.ZipInfo(info.filename, date_time=date_time)
+            new_info.compress_type = zipfile.ZIP_DEFLATED
+            new_info.external_attr = info.external_attr
+            dst.writestr(new_info, data)
+    tmp.replace(path)
+    return path
+
+
+def _normalize_pdf_id(path: Path) -> Path:
+    """Replace the random trailer /ID pair so PDFs are byte-for-byte reproducible."""
+    import re
+
+    fixed = b"11111111111111111111111111111111"
+    data = path.read_bytes()
+    data, count = re.subn(
+        rb"/ID\s*\[\s*<[0-9A-F]{32}>\s*<[0-9A-F]{32}>\s*\]",
+        b"/ID[<" + fixed + b"><" + fixed + b">]",
+        data,
+    )
+    if count:
+        path.write_bytes(data)
+    return path
+
+
+def make_pdf(path: Path, *, pages: int = 3, scanned: bool = False, title: str = "Test Report") -> Path:
     import pymupdf
 
     doc = pymupdf.open()
@@ -23,10 +71,17 @@ def make_pdf(path: Path, *, pages: int = 3, scanned: bool = False) -> Path:
             rect = pymupdf.Rect(72, 220, 250, 240)
             page.insert_text((72, 232), "https://example.com/page", fontsize=10)
             page.insert_link({"kind": pymupdf.LINK_URI, "from": rect, "uri": "https://example.com/page"})
-    doc.set_metadata({"title": "Test Report", "author": "Markforge Tests"})
+    doc.set_metadata(
+        {
+            "title": title,
+            "author": "Markforge Tests",
+            "creationDate": _FIXED_PDF_DATE,
+            "modDate": _FIXED_PDF_DATE,
+        }
+    )
     doc.save(path)
     doc.close()
-    return path
+    return _normalize_pdf_id(path)
 
 
 def make_scanned_pdf(path: Path, *, pages: int = 1) -> Path:
@@ -43,9 +98,12 @@ def make_scanned_pdf(path: Path, *, pages: int = 1) -> Path:
         Image.new("RGB", (400, 500), color=(240, 240, 240)).save(buffer, format="PNG")
         buffer.seek(0)
         page.insert_image(page.rect, stream=buffer.read())
+    doc.set_metadata(
+        {"title": "Scanned Test Report", "creationDate": _FIXED_PDF_DATE, "modDate": _FIXED_PDF_DATE}
+    )
     doc.save(path)
     doc.close()
-    return path
+    return _normalize_pdf_id(path)
 
 
 def _add_hyperlink(paragraph, url: str, text: str) -> None:
@@ -95,7 +153,7 @@ def make_docx(path: Path) -> Path:
     table.cell(2, 1).text = "20"
     doc.add_paragraph("A quote line", style="Intense Quote")
     doc.save(path)
-    return path
+    return _normalize_zip_timestamps(path)
 
 
 def make_pptx(path: Path, *, slides: int = 3) -> Path:
@@ -103,6 +161,8 @@ def make_pptx(path: Path, *, slides: int = 3) -> Path:
 
     titles = ["Introduction", "Network Architecture", "Deployment Plan"]
     prs = Presentation()
+    prs.core_properties.created = _FIXED_PY_DATETIME
+    prs.core_properties.modified = _FIXED_PY_DATETIME
     for index in range(1, slides + 1):
         slide = prs.slides.add_slide(prs.slide_layouts[1])
         title = slide.shapes.title
@@ -115,13 +175,15 @@ def make_pptx(path: Path, *, slides: int = 3) -> Path:
         notes = slide.notes_slide
         notes.notes_text_frame.text = f"Speaker notes for slide {index}."
     prs.save(path)
-    return path
+    return _normalize_zip_timestamps(path)
 
 
 def make_xlsx(path: Path, *, sheets: int = 2) -> Path:
     from openpyxl import Workbook
 
     wb = Workbook()
+    wb.properties.created = _FIXED_PY_DATETIME
+    wb.properties.modified = _FIXED_PY_DATETIME
     ws = wb.active
     ws.title = "Grades"
     ws.append(["Name", "Age", "Grade"])
@@ -141,7 +203,7 @@ def make_xlsx(path: Path, *, sheets: int = 2) -> Path:
     ws2.append(["Note"])
     ws2.append(["This sheet is for notes."])
     wb.save(path)
-    return path
+    return _normalize_zip_timestamps(path)
 
 
 def make_two_column_pdf(path: Path) -> Path:
@@ -155,9 +217,10 @@ def make_two_column_pdf(path: Path) -> Path:
         page.insert_text((72, 80 + index * 22), line, fontsize=11)
     for index, line in enumerate(["Right column line A", "Right column line B", "Right column line C"]):
         page.insert_text((340, 80 + index * 22), line, fontsize=11)
+    doc.set_metadata({"title": "Two Column Report", "creationDate": _FIXED_PDF_DATE, "modDate": _FIXED_PDF_DATE})
     doc.save(path)
     doc.close()
-    return path
+    return _normalize_pdf_id(path)
 
 
 def make_deck_pdf(path: Path, *, missions: int = 3) -> Path:
@@ -191,6 +254,9 @@ def make_deck_pdf(path: Path, *, missions: int = 3) -> Path:
     buffer.seek(0)
     page.insert_image(page.rect, stream=buffer.read())
 
+    doc.set_metadata(
+        {"title": "Deck Report", "creationDate": _FIXED_PDF_DATE, "modDate": _FIXED_PDF_DATE}
+    )
     doc.save(path)
     doc.close()
-    return path
+    return _normalize_pdf_id(path)

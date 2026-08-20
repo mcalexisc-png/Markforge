@@ -17,7 +17,7 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: 1,
   reporter: "list",
   timeout: 60_000,
   globalSetup: "./playwright.global-setup.ts",
@@ -30,7 +30,6 @@ export default defineConfig({
       command: `${backendPython} -m uvicorn app.main:app --host 127.0.0.1 --port 3001`,
       cwd: "../backend",
       url: "http://127.0.0.1:3001/api/health",
-      reuseExistingServer: true,
       timeout: 60_000,
       env: {
         MARKFORGE_JOB_MODE: "sync",
@@ -45,7 +44,6 @@ export default defineConfig({
       command: "npm run dev",
       cwd: ".",
       url: "http://127.0.0.1:3000",
-      reuseExistingServer: true,
       timeout: 120_000,
       env: {
         API_PROXY_TARGET: "http://127.0.0.1:3001",

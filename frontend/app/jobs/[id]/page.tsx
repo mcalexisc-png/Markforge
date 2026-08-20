@@ -20,6 +20,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Header } from "@/components/header";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { MarkdownPreview } from "@/components/markdown-preview";
@@ -48,10 +49,13 @@ export default function JobWorkspacePage() {
   const [preview, setPreview] = React.useState<Preview | null>(null);
   const [previewLoading, setPreviewLoading] = React.useState(false);
   const [draft, setDraft] = React.useState<string>("");
+  const draftRef = React.useRef("");
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [view, setView] = React.useState<"edit" | "preview">("preview");
   const [deleting, setDeleting] = React.useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = React.useState(false);
+  const [confirmResetOpen, setConfirmResetOpen] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     try {
@@ -107,10 +111,11 @@ export default function JobWorkspacePage() {
 
   const handleSave = async () => {
     setSaving(true);
+    const content = draftRef.current;
     try {
-      await saveMarkdown(jobId, draft, activeFileId ?? undefined);
+      await saveMarkdown(jobId, content, activeFileId ?? undefined);
       setDirty(false);
-      setPreview((p) => (p ? { ...p, content: draft } : p));
+      setPreview((p) => (p ? { ...p, content } : p));
       toast.success("Markdown saved");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to save");
@@ -153,6 +158,16 @@ export default function JobWorkspacePage() {
     }
   };
 
+  const confirmDelete = async () => {
+    setConfirmDeleteOpen(false);
+    await handleDelete();
+  };
+
+  const confirmReset = async () => {
+    setConfirmResetOpen(false);
+    await handleReset();
+  };
+
   return (
     <div className="min-h-dvh">
       <Header />
@@ -188,7 +203,7 @@ export default function JobWorkspacePage() {
               <Button variant="outline" size="sm" onClick={() => void handleDownload(zipUrl(jobId), `markforge-${jobId}.zip`)}>
                 <FileArchive className="h-4 w-4" /> Download ZIP
               </Button>
-              <Button variant="ghost" size="sm" className="text-destructive" onClick={handleDelete} disabled={deleting}>
+              <Button variant="ghost" size="sm" className="text-destructive" onClick={() => setConfirmDeleteOpen(true)} disabled={deleting}>
                 <Trash2 className="h-4 w-4" /> {deleting ? "Deleting…" : "Delete"}
               </Button>
             </div>
@@ -268,7 +283,7 @@ export default function JobWorkspacePage() {
                     </Tabs>
                     <div className="flex items-center gap-2">
                       {dirty && <span className="text-xs text-warning">Unsaved changes</span>}
-                      <Button variant="outline" size="sm" onClick={() => void handleReset()} disabled={saving || !(dirty || active?.edited)}>
+                      <Button variant="outline" size="sm" onClick={() => setConfirmResetOpen(true)} disabled={saving || !(dirty || active?.edited)}>
                         <RotateCcw className="h-3.5 w-3.5" /> Reset
                       </Button>
                       <Button size="sm" onClick={handleSave} disabled={saving || !dirty}>
@@ -278,7 +293,7 @@ export default function JobWorkspacePage() {
                   </div>
                   <div className="flex-1 overflow-hidden">
                     {view === "edit" ? (
-                      <MarkdownEditor value={draft} onChange={(value) => { setDraft(value); setDirty(true); }} height="100%" />
+                      <MarkdownEditor value={draft} onChange={(value) => { draftRef.current = value; setDraft(value); setDirty(true); }} height="100%" />
                     ) : (
                       <div className="h-full overflow-y-auto">
                         <MarkdownPreview content={draft} />
@@ -300,6 +315,25 @@ export default function JobWorkspacePage() {
         )}
 
         {!job && !error && <LoadingState />}
+
+        <ConfirmDialog
+          open={confirmDeleteOpen}
+          onOpenChange={setConfirmDeleteOpen}
+          title="Delete this conversion?"
+          description={`This permanently removes "${job?.items[0]?.filename ?? "this job"}" and all of its outputs from this machine. This cannot be undone.`}
+          confirmLabel="Delete"
+          busy={deleting}
+          onConfirm={() => void confirmDelete()}
+        />
+        <ConfirmDialog
+          open={confirmResetOpen}
+          onOpenChange={setConfirmResetOpen}
+          title="Reset to original?"
+          description={`Any edits to "${active?.filename ?? "this file"}" will be discarded and replaced with the original extracted content.`}
+          confirmLabel="Reset"
+          destructive={false}
+          onConfirm={() => void confirmReset()}
+        />
       </main>
     </div>
   );

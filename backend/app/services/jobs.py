@@ -32,6 +32,7 @@ from markdown.cleanup import postprocess
 logger = logging.getLogger("markforge.jobs")
 
 _job_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_jobs))
+_queue_slots = threading.BoundedSemaphore(8)
 
 _MIN_TIMEOUT = 30
 
@@ -152,10 +153,10 @@ def dispatch_job(job_id: str) -> None:
         celery_app.send_task("markforge.process_job", args=[job_id])
         logger.info("Dispatched job %s to Celery", job_id)
     else:
-        if not _job_slots.acquire(blocking=False):
+        if not _queue_slots.acquire(blocking=False):
             raise HTTPException(
                 status_code=409,
-                detail="Too many conversions are already running. Please wait a moment and try again.",
+                detail="Too many conversions are already waiting to run. Please wait a moment and try again.",
             )
         threading.Thread(target=_run_job_with_slot, args=[job_id], daemon=True).start()
         logger.info("Dispatched job %s in-process", job_id)
@@ -163,9 +164,11 @@ def dispatch_job(job_id: str) -> None:
 
 def _run_job_with_slot(job_id: str) -> None:
     try:
+        _job_slots.acquire()
         process_job(job_id)
     finally:
         _job_slots.release()
+        _queue_slots.release()
 
 
 # --------------------------------------------------------------------- #

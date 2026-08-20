@@ -32,7 +32,6 @@ Thumbs.db
 backend/tests/e2e-results/
 playwright-report/
 test-results/
-frontend/e2e/fixtures/
 *.db
 *.db-wal
 *.db-shm

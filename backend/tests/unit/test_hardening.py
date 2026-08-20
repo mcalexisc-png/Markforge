@@ -12,9 +12,22 @@ from app.core.security import verify_token
 
 class TestSecretKey:
     def test_custom_key_used_as_is(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(settings, "secret_key", "my-custom-key")
+        monkeypatch.setattr(settings, "secret_key", "my-custom-key-0123456789abcdef")
         monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
-        assert settings.cookie_secret() == "my-custom-key"
+        assert settings.cookie_secret() == "my-custom-key-0123456789abcdef"
+
+    def test_placeholder_keys_are_ignored(self, tmp_path, monkeypatch):
+        for placeholder in ("change-me", "change_me", "changeme", "dev-only-change-me"):
+            monkeypatch.setattr(settings, "secret_key", placeholder)
+            monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
+            secret = settings.cookie_secret()
+            assert secret != placeholder
+            assert len(secret) >= 32
+
+    def test_short_keys_are_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "secret_key", "short")
+        monkeypatch.setattr(settings, "storage_dir", str(tmp_path / "storage"))
+        assert len(settings.cookie_secret()) >= 32
 
     def test_default_key_generates_and_persists(self, tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "secret_key", "dev-only-change-me")

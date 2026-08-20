@@ -1,8 +1,18 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const fixturePath = (name: string) =>
   join(process.cwd(), "e2e", "fixtures", name);
+
+const uniqueCopy = (name: string, salt = "batch") => ({
+  name,
+  mimeType: "",
+  buffer: Buffer.concat([
+    readFileSync(fixturePath(name)),
+    Buffer.from(`\ne2e-${salt}-${name}\n`),
+  ]),
+});
 
 test("dashboard loads and shows the dropzone", async ({ page }) => {
   await page.goto("/");
@@ -12,13 +22,13 @@ test("dashboard loads and shows the dropzone", async ({ page }) => {
 
 test("upload -> convert -> preview -> edit -> download flow", async ({ page }) => {
   await page.goto("/");
-  await page.setInputFiles('input[type="file"]', fixturePath("report.pdf"));
-  await expect(page.getByText("report.pdf")).toBeVisible();
+  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "single-flow"));
+  await expect(page.getByText("notes.docx")).toBeVisible();
 
   await page.getByRole("button", { name: "Convert to Markdown" }).click();
   await page.waitForURL(/\/jobs\//, { timeout: 30_000 });
 
-  await expect(page.getByText("report.pdf")).toBeVisible();
+  await expect(page.getByText("notes.docx")).toBeVisible();
   await expect(page.getByText("Converted", { exact: false })).toBeVisible({ timeout: 30_000 });
 
   await expect(page.getByRole("tab", { name: "Preview" })).toBeVisible();
@@ -33,13 +43,13 @@ test("upload -> convert -> preview -> edit -> download flow", async ({ page }) =
   await page.keyboard.press("ControlOrMeta+End");
   await page.keyboard.type("\n\n# Appended by e2e test");
   await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("Unsaved changes")).toBeHidden();
-  await expect(page.getByText("Markdown saved")).toBeVisible();
+  await expect(page.getByText("Markdown saved")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Unsaved changes")).toBeHidden({ timeout: 15_000 });
 
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download .md" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toBe("report.md");
+  expect(download.suggestedFilename()).toBe("notes.md");
 
   const zipPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download ZIP" }).click();
@@ -49,27 +59,31 @@ test("upload -> convert -> preview -> edit -> download flow", async ({ page }) =
 
 test("history shows the job and can be deleted", async ({ page }) => {
   await page.goto("/");
-  await page.setInputFiles('input[type="file"]', fixturePath("notes.docx"));
+  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "history"));
   await page.getByRole("button", { name: "Convert to Markdown" }).click();
   await page.waitForURL(/\/jobs\//, { timeout: 30_000 });
   await expect(page.getByText("Converted", { exact: false })).toBeVisible({ timeout: 30_000 });
 
   await page.getByRole("link", { name: "History" }).click();
-  await expect(page.getByRole("link", { name: "notes.docx" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "notes.docx" })).toHaveAttribute("href", /\/jobs\//);
+  const notesLinks = page.getByRole("link", { name: "notes.docx" });
+  await expect(notesLinks.first()).toBeVisible();
+  await expect(notesLinks.first()).toHaveAttribute("href", /\/jobs\//);
 
-  await page.getByRole("button", { name: "Delete notes.docx" }).click();
-  await expect(page.getByRole("link", { name: "notes.docx" })).toHaveCount(0);
+  const notesLinksBefore = await notesLinks.count();
+  await page.getByRole("button", { name: "Delete notes.docx" }).first().click();
+  await expect(page.getByRole("heading", { name: "Delete this conversion?" })).toBeVisible();
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(notesLinks).toHaveCount(notesLinksBefore - 1);
   await expect(page.getByText("Deleted", { exact: false })).toBeVisible();
 });
 
 test("batch conversion of all four formats", async ({ page }) => {
   await page.goto("/");
   await page.setInputFiles('input[type="file"]', [
-    fixturePath("report.pdf"),
-    fixturePath("notes.docx"),
-    fixturePath("deck.pptx"),
-    fixturePath("grades.xlsx"),
+    uniqueCopy("report.pdf"),
+    uniqueCopy("notes.docx"),
+    uniqueCopy("deck.pptx"),
+    uniqueCopy("grades.xlsx"),
   ]);
   await expect(page.getByText("report.pdf")).toBeVisible();
   await expect(page.getByText("grades.xlsx")).toBeVisible();

@@ -72,6 +72,19 @@ def _insert_image_placeholders(markdown: str, textless: set[int], label: str) ->
     return "".join(parts)
 
 
+def _ocrmypdf_importable() -> bool:
+    try:
+        import ocrmypdf  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ocr_engine_available() -> bool:
+    """True when both the Tesseract binary and the ocrmypdf package are present."""
+    return tesseract_available() and _ocrmypdf_importable()
+
+
 def _ocr_pdf_copy(source: Path, context: ConversionContext, *, force_ocr: bool = False) -> Path | None:
     """OCR a scanned PDF into a temp copy and return its path (or None)."""
     tmp = Path(tempfile.mkdtemp(prefix="markforge-ocr-"))
@@ -186,7 +199,7 @@ def convert_with_markitdown(context: ConversionContext) -> Document:
         else:
             needs_ocr = _detect_scanned_pdf(path_for_conversion)
         if needs_ocr:
-            if tesseract_available():
+            if _ocr_engine_available():
                 ocr_copy = _ocr_pdf_copy(path_for_conversion, context, force_ocr=force_ocr)
                 if ocr_copy is not None:
                     path_for_conversion = ocr_copy
