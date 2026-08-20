@@ -14,6 +14,7 @@ _UNSAFE_NAME_RE = re.compile(r"[^\w. ()-]+", re.UNICODE)
 
 def safe_filename(name: str, max_length: int = 120) -> str:
     """Sanitize an uploaded filename to prevent path traversal and oddities."""
+    name = name.replace("\\", "/")  # normalize separators on every OS
     name = Path(name).name
     name = name.replace("\x00", "")
     name = _UNSAFE_NAME_RE.sub("_", name).strip(" .")
