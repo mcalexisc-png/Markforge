@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -32,6 +32,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { confirmDiscardChanges, setUnsavedChanges } from "@/lib/unsaved";
 import { deleteJob, downloadFile, downloadUrl, getJob, getPreview, resetMarkdown, saveMarkdown, zipUrl } from "@/lib/api";
 import type { Job, JobFileState, Preview } from "@/lib/types";
 import { formatBytes } from "@/lib/utils";
@@ -41,7 +42,10 @@ const ACTIVE_STATUSES = new Set(["queued", "running"]);
 export default function JobWorkspacePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const jobId = params.id;
+  // Search results deep-link to a specific file within the job.
+  const requestedFileId = searchParams.get("file");
 
   const [job, setJob] = React.useState<Job | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -51,6 +55,9 @@ export default function JobWorkspacePage() {
   const [draft, setDraft] = React.useState<string>("");
   const draftRef = React.useRef("");
   const [dirty, setDirty] = React.useState(false);
+  // The content as last loaded or saved. Comparing against it keeps "Unsaved
+  // changes" (and an enabled Save) from appearing when nothing really changed.
+  const savedRef = React.useRef("");
   const [saving, setSaving] = React.useState(false);
   const [view, setView] = React.useState<"edit" | "preview">("preview");
   const [deleting, setDeleting] = React.useState(false);
@@ -63,27 +70,92 @@ export default function JobWorkspacePage() {
       setJob(data);
       setError(null);
       if (!activeFileId && data.items.length > 0) {
-        const preferred = data.items.find((i) => i.status === "completed" || i.status === "running");
+        const requested = requestedFileId
+          ? data.items.find((i) => i.file_id === requestedFileId)
+          : undefined;
+        const preferred =
+          requested ?? data.items.find((i) => i.status === "completed" || i.status === "running");
         setActiveFileId((preferred ?? data.items[0]).file_id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load job");
     }
-  }, [jobId, activeFileId]);
+  }, [jobId, activeFileId, requestedFileId]);
 
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
 
   const active = job?.items.find((i) => i.file_id === activeFileId) ?? null;
+  // Relative `assets/...` paths in the Markdown resolve against this for the
+  // rendered preview only; the saved and downloaded file keeps them relative.
+  const assetBase = activeFileId ? `/api/jobs/${jobId}/assets/${activeFileId}` : undefined;
   const running = job !== null && ACTIVE_STATUSES.has(job.status);
   const finished = job !== null && !ACTIVE_STATUSES.has(job.status);
 
+  // Held in a ref so the stream below depends only on the job, not on the
+  // identity of `refresh` -- which changes whenever a file tab is selected and
+  // would otherwise tear down and rebuild the connection on every click.
+  const refreshRef = React.useRef(refresh);
+  React.useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
+
+  // Live progress over Server-Sent Events. One server-side reader replaces a
+  // per-second poll from every open tab; polling remains only as a fallback if
+  // the stream cannot be established, and backs off instead of hammering.
   React.useEffect(() => {
     if (!running) return;
-    const id = window.setInterval(() => void refresh(), 1000);
-    return () => window.clearInterval(id);
-  }, [running, refresh]);
+
+    let cancelled = false;
+    let doneReceived = false;
+    let source: EventSource | null = null;
+    let pollTimer: number | undefined;
+
+    const startFallbackPolling = () => {
+      if (cancelled || doneReceived || pollTimer !== undefined) return;
+      let attempts = 0;
+      const tick = () => {
+        if (cancelled) return;
+        attempts += 1;
+        void refreshRef.current();
+        const delay = Math.min(1000 * 2 ** Math.floor(attempts / 5), 10_000);
+        pollTimer = window.setTimeout(tick, delay);
+      };
+      pollTimer = window.setTimeout(tick, 1000);
+    };
+
+    try {
+      source = new EventSource(`/api/jobs/${jobId}/events`);
+      source.addEventListener("job", (event) => {
+        if (cancelled) return;
+        try {
+          setJob(JSON.parse((event as MessageEvent).data) as Job);
+          setError(null);
+        } catch {
+          /* ignore a malformed frame rather than killing the stream */
+        }
+      });
+      source.addEventListener("done", () => {
+        doneReceived = true;
+        source?.close();
+      });
+      source.onerror = () => {
+        source?.close();
+        source = null;
+        // A normal close after `done` is not a failure.
+        startFallbackPolling();
+      };
+    } catch {
+      startFallbackPolling();
+    }
+
+    return () => {
+      cancelled = true;
+      source?.close();
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+    };
+  }, [running, jobId]);
 
   React.useEffect(() => {
     if (!active || active.status !== "completed" || activeFileId === null) return;
@@ -95,6 +167,8 @@ export default function JobWorkspacePage() {
         if (cancelled) return;
         setPreview(data);
         setDraft(data.content);
+        draftRef.current = data.content;
+        savedRef.current = data.content;
         setDirty(false);
         if (data.content.length === 0 && view === "preview") setView("edit");
       } catch (err) {
@@ -109,11 +183,31 @@ export default function JobWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFileId, active?.status]);
 
+  // Publish dirty state so the header nav and Back link can guard on it, and
+  // always clear it on unmount so a stale flag cannot block later navigation.
+  React.useEffect(() => {
+    setUnsavedChanges(dirty);
+    return () => setUnsavedChanges(false);
+  }, [dirty]);
+
+  React.useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Browsers show their own wording; a non-empty returnValue is what
+      // actually triggers the prompt.
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   const handleSave = async () => {
     setSaving(true);
     const content = draftRef.current;
     try {
       await saveMarkdown(jobId, content, activeFileId ?? undefined);
+      savedRef.current = content;
       setDirty(false);
       setPreview((p) => (p ? { ...p, content } : p));
       toast.success("Markdown saved");
@@ -130,6 +224,8 @@ export default function JobWorkspacePage() {
       const data = await resetMarkdown(jobId, activeFileId ?? undefined);
       setPreview(data);
       setDraft(data.content);
+      draftRef.current = data.content;
+      savedRef.current = data.content;
       setDirty(false);
       void refresh();
       toast.success("Restored original extracted content");
@@ -177,7 +273,7 @@ export default function JobWorkspacePage() {
             <Link
               href="/"
               className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-            >
+             onClick={(event) => { if (!confirmDiscardChanges()) event.preventDefault(); }}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Link>
             <div className="h-4 w-px bg-border" />
@@ -293,10 +389,18 @@ export default function JobWorkspacePage() {
                   </div>
                   <div className="flex-1 overflow-hidden">
                     {view === "edit" ? (
-                      <MarkdownEditor value={draft} onChange={(value) => { draftRef.current = value; setDraft(value); setDirty(true); }} height="100%" />
+                      <MarkdownEditor
+                        value={draft}
+                        onChange={(value) => {
+                          draftRef.current = value;
+                          setDraft(value);
+                          setDirty(value !== savedRef.current);
+                        }}
+                        height="100%"
+                      />
                     ) : (
                       <div className="h-full overflow-y-auto">
-                        <MarkdownPreview content={draft} />
+                        <MarkdownPreview content={draft} assetBase={assetBase} />
                       </div>
                     )}
                   </div>

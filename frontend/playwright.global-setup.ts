@@ -1,16 +1,15 @@
 import { execSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 export default function globalSetup() {
-  const e2eData = process.env.MARKFORGE_E2E_DATA;
-  if (e2eData) {
-    try {
-      rmSync(e2eData, { recursive: true, force: true });
-    } catch {
-      /* dir may be locked by a previous run; the unique per-run dir makes this best-effort */
-    }
-  }
+  // The data directory is deliberately NOT wiped here. Playwright starts
+  // `webServer` before globalSetup, so the backend has already created and
+  // opened its SQLite database by this point; deleting the directory leaves
+  // the server holding a handle to an unlinked inode, and the next connection
+  // it opens silently creates an empty database ("no such table: jobs").
+  // The wipe was also redundant: MARKFORGE_E2E_DATA is unique per run
+  // (`markforge-e2e-${Date.now()}`), so there is never stale state to clear.
 
   const script = join(process.cwd(), "e2e", "generate-fixtures.mjs");
   try {

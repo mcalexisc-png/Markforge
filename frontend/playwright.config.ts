@@ -57,5 +57,12 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
     },
+    {
+      // The layout is responsive but was never exercised at phone width, where
+      // a percentage-height CodeMirror inside a flex child is the classic
+      // collapse-to-zero case.
+      name: "mobile",
+      use: { ...devices["Pixel 7"] },
+    },
   ],
 });

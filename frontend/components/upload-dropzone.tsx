@@ -1,14 +1,48 @@
 "use client";
 
 import * as React from "react";
-import { FilePlus2, FileText, Presentation, Sheet, UploadCloud } from "lucide-react";
+import {
+  BookOpen,
+  File,
+  FileCode,
+  FileJson,
+  FilePlus2,
+  FileText,
+  Globe,
+  Mail,
+  NotebookText,
+  Presentation,
+  Sheet,
+  UploadCloud,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { UploadedFile } from "@/lib/types";
-import { uploadFiles } from "@/lib/api";
+import { UploadAbortedError, uploadFiles } from "@/lib/api";
+import { Progress } from "@/components/ui/progress";
+import { Button } from "@/components/ui/button";
 import { formatBytes } from "@/lib/utils";
 import { toast } from "sonner";
 
-const ACCEPTED = [".pdf", ".docx", ".pptx", ".xlsx"];
+// Mirrors ALLOWED_EXTENSIONS in backend/converters/__init__.py. Local-only
+// formats only -- audio and standalone images are deliberately excluded because
+// MarkItDown converts them through network services.
+const ACCEPTED = [
+  ".pdf",
+  ".docx",
+  ".pptx",
+  ".xlsx",
+  ".csv",
+  ".tsv",
+  ".html",
+  ".htm",
+  ".txt",
+  ".md",
+  ".json",
+  ".xml",
+  ".epub",
+  ".msg",
+  ".ipynb",
+];
 
 const MAX_FILE_MB = 100;
 const MAX_FILES = 25;
@@ -18,15 +52,40 @@ function extensionOf(name: string): string {
   return index >= 0 ? name.slice(index).toLowerCase() : "";
 }
 
-const formatMeta: Record<string, { icon: typeof FileText; label: string; color: string }> = {
+type FormatMeta = { icon: typeof FileText; label: string; color: string };
+
+/** Shown for any format without an entry below, so an unknown format from the
+ *  backend degrades to a generic row instead of crashing the list. */
+const DEFAULT_FORMAT_META: FormatMeta = {
+  icon: File,
+  label: "FILE",
+  color: "text-muted-foreground",
+};
+
+const formatMeta: Record<string, FormatMeta> = {
   pdf: { icon: FileText, label: "PDF", color: "text-red-500/80 dark:text-red-400/80" },
   docx: { icon: FileText, label: "DOCX", color: "text-blue-500/80 dark:text-blue-400/80" },
   pptx: { icon: Presentation, label: "PPTX", color: "text-orange-500/80 dark:text-orange-400/80" },
   xlsx: { icon: Sheet, label: "XLSX", color: "text-green-600/80 dark:text-green-400/80" },
+  csv: { icon: Sheet, label: "CSV", color: "text-emerald-600/80 dark:text-emerald-400/80" },
+  tsv: { icon: Sheet, label: "TSV", color: "text-emerald-600/80 dark:text-emerald-400/80" },
+  html: { icon: Globe, label: "HTML", color: "text-sky-500/80 dark:text-sky-400/80" },
+  htm: { icon: Globe, label: "HTML", color: "text-sky-500/80 dark:text-sky-400/80" },
+  txt: { icon: FileText, label: "TXT", color: "text-slate-500/80 dark:text-slate-400/80" },
+  md: { icon: FileText, label: "MD", color: "text-slate-500/80 dark:text-slate-400/80" },
+  json: { icon: FileJson, label: "JSON", color: "text-amber-500/80 dark:text-amber-400/80" },
+  xml: { icon: FileCode, label: "XML", color: "text-violet-500/80 dark:text-violet-400/80" },
+  epub: { icon: BookOpen, label: "EPUB", color: "text-purple-500/80 dark:text-purple-400/80" },
+  msg: { icon: Mail, label: "MSG", color: "text-cyan-600/80 dark:text-cyan-400/80" },
+  ipynb: { icon: NotebookText, label: "IPYNB", color: "text-rose-500/80 dark:text-rose-400/80" },
 };
 
+function metaFor(format: string): FormatMeta {
+  return formatMeta[format] ?? DEFAULT_FORMAT_META;
+}
+
 export function formatIcon(format: string) {
-  return formatMeta[format]?.icon ?? FileText;
+  return metaFor(format).icon;
 }
 
 interface DropzoneProps {
@@ -40,7 +99,16 @@ export function UploadDropzone({ files, onFilesAdded, onRemove, onClear }: Dropz
   const inputRef = React.useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
+  const [progress, setProgress] = React.useState<number | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
   const dragCounter = React.useRef(0);
+
+  // Deliberately no abort-on-unmount. React's dev StrictMode mounts, unmounts
+  // and remounts, so an unmount cleanup cancels any upload that started during
+  // that window -- exactly what a fast drop-then-interact does. An upload that
+  // outlives the component is harmless (the file lands server-side and
+  // unreferenced uploads are pruned), so cancelling stays an explicit act via
+  // the Cancel button.
 
   const handleFiles = async (list: FileList | File[]) => {
     const incoming = Array.from(list);
@@ -57,7 +125,7 @@ export function UploadDropzone({ files, onFilesAdded, onRemove, onClear }: Dropz
     }
     if (badType.length > 0) {
       toast.error(
-        `${badType.length} file${badType.length > 1 ? "s" : ""} skipped — only PDF, DOCX, PPTX and XLSX are supported.`,
+        `${badType.length} file${badType.length > 1 ? "s" : ""} skipped — ${ACCEPTED.map((e) => e.slice(1)).join(", ")} are supported.`,
       );
     }
     if (oversized.length > 0) {
@@ -65,18 +133,31 @@ export function UploadDropzone({ files, onFilesAdded, onRemove, onClear }: Dropz
     }
     if (valid.length === 0) return;
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     setUploading(true);
+    setProgress(0);
     try {
-      const records = await uploadFiles(valid);
+      const records = await uploadFiles(valid, {
+        onProgress: setProgress,
+        signal: controller.signal,
+      });
       onFilesAdded(records);
       const dupes = records.filter((r) => r.duplicate_of);
       if (dupes.length > 0) {
         toast.info(`${dupes.length} duplicate file${dupes.length > 1 ? "s" : ""} skipped`);
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Upload failed");
+      // Cancelling is a deliberate act, not an error to apologise for.
+      if (error instanceof UploadAbortedError) {
+        toast.info("Upload cancelled");
+      } else {
+        toast.error(error instanceof Error ? error.message : "Upload failed");
+      }
     } finally {
+      abortRef.current = null;
       setUploading(false);
+      setProgress(null);
     }
   };
 
@@ -160,16 +241,34 @@ export function UploadDropzone({ files, onFilesAdded, onRemove, onClear }: Dropz
           ))}
         </div>
         {uploading && (
-          <p className="text-xs text-muted-foreground animate-pulse-soft" role="status">
-            Uploading…
-          </p>
+          <div className="w-full max-w-sm space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+                {progress === null
+                  ? "Uploading…"
+                  : `Uploading… ${Math.round(progress * 100)}%`}
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  abortRef.current?.abort();
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+            <Progress value={(progress ?? 0) * 100} />
+          </div>
         )}
       </div>
 
       {files.length > 0 && (
         <ul className="animate-fade-in divide-y divide-border overflow-hidden rounded-xl border border-border bg-card shadow-sm" aria-label="Files ready for conversion">
           {files.map((file) => {
-            const meta = formatMeta[file.format];
+            const meta = metaFor(file.format);
             const Icon = meta.icon;
             return (
               <li key={file.id} className="flex items-center gap-3 px-4 py-3">

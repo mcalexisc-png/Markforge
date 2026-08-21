@@ -33,6 +33,12 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
   const panelRef = React.useRef<HTMLDivElement>(null);
   const previousFocus = React.useRef<HTMLElement | null>(null);
 
+  // Always call the newest callback without making it an effect dependency.
+  const onOpenChangeRef = React.useRef(onOpenChange);
+  React.useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
   React.useEffect(() => {
     if (!open) return;
     previousFocus.current = document.activeElement as HTMLElement | null;
@@ -45,7 +51,7 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
 
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
         return;
       }
       if (event.key !== "Tab") return;
@@ -72,7 +78,13 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
       document.body.style.overflow = "";
       previousFocus.current?.focus();
     };
-  }, [open, onOpenChange]);
+    // `onOpenChange` is intentionally not a dependency: callers commonly pass
+    // an inline arrow, so a new identity on every render would tear this
+    // effect down and rebuild it on each keystroke -- thrashing body overflow
+    // and stealing focus back to the first field mid-typing. The latest
+    // callback is read through a ref instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open) return null;
 

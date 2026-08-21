@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, FileArchive, FileClock, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowRight, FileArchive, FileClock, Search, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Header } from "@/components/header";
@@ -12,8 +12,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { deleteJob, downloadFile, getHistory, zipUrl } from "@/lib/api";
-import type { HistoryItem } from "@/lib/types";
+import { Input } from "@/components/ui/input";
+import { deleteJob, downloadFile, getHistory, searchDocuments, zipUrl } from "@/lib/api";
+import type { HistoryItem, SearchHit } from "@/lib/types";
 import { cn, formatBytes, formatDate } from "@/lib/utils";
 
 const statusVariant = (status: HistoryItem["status"]) =>
@@ -27,21 +28,55 @@ const statusVariant = (status: HistoryItem["status"]) =>
 
 export default function HistoryPage() {
   const router = useRouter();
-const [items, setItems] = React.useState<HistoryItem[]>([]);
+  const [items, setItems] = React.useState<HistoryItem[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<{ id: string; filename: string } | null>(null);
+  const [query, setQuery] = React.useState("");
+  const [hits, setHits] = React.useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
+    setLoading(true);
     try {
       const data = await getHistory();
       setItems(data);
+      setLoadError(null);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to load history");
+      // An error state, not an empty state: "Nothing here yet" would read as
+      // "you have no conversions" when the backend is simply unreachable.
+      setLoadError(error instanceof Error ? error.message : "Failed to load history");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // Debounced so typing does not fire a request per keystroke.
+  React.useEffect(() => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setHits(null);
+      setSearching(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      searchDocuments(trimmed, controller.signal)
+        .then(setHits)
+        .catch((error) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          toast.error(error instanceof Error ? error.message : "Search failed");
+          setHits([]);
+        })
+        .finally(() => setSearching(false));
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [query]);
 
   React.useEffect(() => {
     void refresh();
@@ -76,7 +111,43 @@ const [items, setItems] = React.useState<HistoryItem[]>([]);
           <p className="mt-1 text-sm text-muted-foreground">Every job is stored locally on this machine.</p>
         </div>
 
-        {loading ? (
+        <div className="relative mb-6">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search inside every converted document…"
+            aria-label="Search converted documents"
+            className="pl-9 pr-9"
+          />
+          {query && (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Clear search"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2"
+              onClick={() => setQuery("")}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+
+        {loadError ? (
+          <Card>
+            <CardContent className="flex flex-col items-center gap-3 py-14 text-center">
+              <AlertCircle className="h-10 w-10 text-destructive/70" />
+              <p className="text-sm font-medium">Could not load your history</p>
+              <p className="max-w-sm text-sm text-muted-foreground">{loadError}</p>
+              <Button className="mt-2" onClick={() => void refresh()}>
+                Try again
+              </Button>
+            </CardContent>
+          </Card>
+        ) : hits !== null ? (
+          <SearchResults hits={hits} searching={searching} query={query} />
+        ) : loading ? (
           <div className="space-y-3">
             {[0, 1, 2].map((i) => (
               <Skeleton key={i} className="h-16 w-full rounded-xl" />
@@ -179,5 +250,79 @@ const [items, setItems] = React.useState<HistoryItem[]>([]);
         />
       </main>
     </div>
+  );
+}
+
+
+/** FTS5 wraps each match in square brackets; render those runs as <mark>. */
+function Snippet({ text }: { text: string }) {
+  const parts = text.split(/(\[[^\]]*\])/g);
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.startsWith("[") && part.endsWith("]") ? (
+          <mark key={index} className="rounded bg-primary/20 px-0.5 text-foreground">
+            {part.slice(1, -1)}
+          </mark>
+        ) : (
+          <React.Fragment key={index}>{part}</React.Fragment>
+        ),
+      )}
+    </>
+  );
+}
+
+function SearchResults({
+  hits,
+  searching,
+  query,
+}: {
+  hits: SearchHit[];
+  searching: boolean;
+  query: string;
+}) {
+  if (searching && hits.length === 0) {
+    return (
+      <div className="space-y-3">
+        {[0, 1].map((i) => (
+          <Skeleton key={i} className="h-16 w-full rounded-xl" />
+        ))}
+      </div>
+    );
+  }
+  if (hits.length === 0) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-center gap-3 py-14 text-center">
+          <Search className="h-10 w-10 text-muted-foreground/60" />
+          <p className="text-sm font-medium">No matches for “{query.trim()}”</p>
+          <p className="max-w-sm text-sm text-muted-foreground">
+            Search covers the Markdown of every completed conversion.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <>
+      <p className="mb-3 text-xs text-muted-foreground">
+        {hits.length} match{hits.length > 1 ? "es" : ""} for “{query.trim()}”
+      </p>
+      <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        {hits.map((hit) => (
+          <li key={`${hit.job_id}-${hit.file_id}`}>
+            <Link
+              href={`/jobs/${hit.job_id}?file=${encodeURIComponent(hit.file_id)}`}
+              className="block px-4 py-3.5 transition-colors hover:bg-muted/50"
+            >
+              <p className="truncate text-sm font-medium">{hit.filename}</p>
+              <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                <Snippet text={hit.snippet} />
+              </p>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }

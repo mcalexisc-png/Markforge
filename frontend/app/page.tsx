@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   preserve_boundaries: true,
   convert_tables: true,
   preserve_links: true,
+  extract_images: true,
 };
 
 export default function DashboardPage() {
@@ -42,7 +43,13 @@ export default function DashboardPage() {
 
   const readyFiles = files.filter((f) => !f.duplicate_of);
 
-  usePolling(refresh, 10_000, { enabled: history.length === 0 && !historyError });
+  // Refresh the recent list while anything is still converting. The condition
+  // was inverted: `history.length === 0` stopped refreshing as soon as a job
+  // existed, which is exactly when there is something to watch.
+  const historyPending = history.some(
+    (item) => item.status === "queued" || item.status === "running",
+  );
+  usePolling(refresh, 5_000, { enabled: historyPending && !historyError });
 
   React.useEffect(() => {
     void (async () => {
@@ -131,7 +138,7 @@ export default function DashboardPage() {
             Convert documents into clean, structured Markdown
           </h1>
           <p className="max-w-xl text-balance text-muted-foreground">
-            PDF, DOCX, PPTX and XLSX — converted locally on your machine. Private, deterministic, and yours.
+            PDF, Office, EPUB and text formats — converted locally on your machine. Private, deterministic, and yours.
           </p>
         </section>
 
@@ -205,7 +212,7 @@ export default function DashboardPage() {
                 <FileClock className="h-8 w-8 text-muted-foreground/60" />
                 <p className="text-sm font-medium">No conversions yet</p>
                 <p className="max-w-sm text-sm text-muted-foreground">
-                  Upload your first PDF, DOCX, PPTX or XLSX file to create Markdown.
+                  Upload your first document to create Markdown.
                 </p>
               </CardContent>
             </Card>

@@ -1,0 +1,30 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "markforge-backend",
+      "runtimeExecutable": "/home/zorin/Desktop/Markforge/backend/.venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3001"
+      ],
+      "cwd": "backend",
+      "port": 3001
+    },
+    {
+      "name": "markforge",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
+      "cwd": "frontend",
+      "port": 3000
+    }
+  ]
+}

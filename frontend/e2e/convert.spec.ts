@@ -1,18 +1,25 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const fixturePath = (name: string) =>
   join(process.cwd(), "e2e", "fixtures", name);
 
-const uniqueCopy = (name: string, salt = "batch") => ({
+// Uploads are deduplicated by SHA-256, so every test needs bytes no other
+// test has used. The project name is part of the salt because the desktop and
+// mobile projects share one backend and one data directory: without it, the
+// second project's upload is detected as a duplicate and never staged.
+const uniqueCopy = (name: string, salt = "batch", project = "") => ({
   name,
   mimeType: "",
   buffer: Buffer.concat([
     readFileSync(fixturePath(name)),
-    Buffer.from(`\ne2e-${salt}-${name}\n`),
+    Buffer.from(`\ne2e-${project}-${salt}-${name}\n`),
   ]),
 });
+
+const stagedFiles = (page: Page) =>
+  page.getByRole("list", { name: "Files ready for conversion" });
 
 test("dashboard loads and shows the dropzone", async ({ page }) => {
   await page.goto("/");
@@ -20,16 +27,16 @@ test("dashboard loads and shows the dropzone", async ({ page }) => {
   await expect(page.getByText("Drop files here")).toBeVisible();
 });
 
-test("upload -> convert -> preview -> edit -> download flow", async ({ page }) => {
+test("upload -> convert -> preview -> edit -> download flow", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "single-flow"));
-  await expect(page.getByText("notes.docx")).toBeVisible();
+  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "single-flow", testInfo.project.name));
+  await expect(stagedFiles(page).getByText("notes.docx")).toBeVisible();
 
   await page.getByRole("button", { name: "Convert to Markdown" }).click();
   await page.waitForURL(/\/jobs\//, { timeout: 30_000 });
 
-  await expect(page.getByText("notes.docx")).toBeVisible();
-  await expect(page.getByText("Converted", { exact: false })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("notes.docx").first()).toBeVisible();
+  await expect(page.getByText("Converted", { exact: false }).first()).toBeVisible({ timeout: 30_000 });
 
   await expect(page.getByRole("tab", { name: "Preview" })).toBeVisible();
   await page.getByRole("tab", { name: "Preview" }).click();
@@ -57,9 +64,10 @@ test("upload -> convert -> preview -> edit -> download flow", async ({ page }) =
   expect(zip.suggestedFilename()).toMatch(/\.zip$/);
 });
 
-test("history shows the job and can be deleted", async ({ page }) => {
+test("history shows the job and can be deleted", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "history"));
+  await page.setInputFiles('input[type="file"]', uniqueCopy("notes.docx", "history", testInfo.project.name));
+  await expect(stagedFiles(page).getByText("notes.docx")).toBeVisible();
   await page.getByRole("button", { name: "Convert to Markdown" }).click();
   await page.waitForURL(/\/jobs\//, { timeout: 30_000 });
   await expect(page.getByText("Converted", { exact: false })).toBeVisible({ timeout: 30_000 });
@@ -77,16 +85,16 @@ test("history shows the job and can be deleted", async ({ page }) => {
   await expect(page.getByText("Deleted", { exact: false })).toBeVisible();
 });
 
-test("batch conversion of all four formats", async ({ page }) => {
+test("batch conversion of all four formats", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.setInputFiles('input[type="file"]', [
-    uniqueCopy("report.pdf"),
-    uniqueCopy("notes.docx"),
-    uniqueCopy("deck.pptx"),
-    uniqueCopy("grades.xlsx"),
+    uniqueCopy("report.pdf", "batch", testInfo.project.name),
+    uniqueCopy("notes.docx", "batch", testInfo.project.name),
+    uniqueCopy("deck.pptx", "batch", testInfo.project.name),
+    uniqueCopy("grades.xlsx", "batch", testInfo.project.name),
   ]);
-  await expect(page.getByText("report.pdf")).toBeVisible();
-  await expect(page.getByText("grades.xlsx")).toBeVisible();
+  await expect(stagedFiles(page).getByText("report.pdf")).toBeVisible();
+  await expect(stagedFiles(page).getByText("grades.xlsx")).toBeVisible();
 
   await page.getByRole("button", { name: /Convert all/ }).click();
   await page.waitForURL(/\/jobs\//, { timeout: 30_000 });

@@ -1,11 +1,13 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { FileClock, Hammer } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { confirmDiscardChanges } from "@/lib/unsaved";
 
 const navItems = [
   { href: "/", label: "Convert", icon: Hammer },
@@ -14,10 +16,16 @@ const navItems = [
 
 export function Header() {
   const pathname = usePathname();
+
+  // Client-side navigation never fires `beforeunload`, so an unsaved draft
+  // would vanish on a stray click here. Ask first.
+  const guard = (event: React.MouseEvent) => {
+    if (!confirmDiscardChanges()) event.preventDefault();
+  };
   return (
     <header className="sticky top-0 z-40 border-b border-border/70 bg-background/85 backdrop-blur-md">
       <div className="container flex h-14 items-center justify-between gap-4">
-        <Link href="/" className="flex items-center gap-2.5 focus-visible:rounded-md" aria-label="Markforge home">
+        <Link href="/" onClick={guard} className="flex items-center gap-2.5 focus-visible:rounded-md" aria-label="Markforge home">
           <Logo size={26} />
           <span className="text-[17px] font-semibold tracking-tight">
             Mark<span className="text-primary">forge</span>
@@ -31,6 +39,10 @@ export function Header() {
               <Link
                 key={item.href}
                 href={item.href}
+                onClick={guard}
+                // The label is hidden below `sm`, so without this the link is
+                // an icon with no accessible name on a phone.
+                aria-label={item.label}
                 className={cn(
                   "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                   active

@@ -83,6 +83,7 @@ export interface UserSettings {
   preserve_boundaries: boolean;
   convert_tables: boolean;
   preserve_links: boolean;
+  extract_images: boolean;
 }
 
 export interface HealthInfo {
@@ -92,4 +93,12 @@ export interface HealthInfo {
   worker: string;
   storage: string;
   lan: { enabled: boolean; auth_required: boolean };
+}
+
+export interface SearchHit {
+  job_id: string;
+  file_id: string;
+  filename: string;
+  /** Matched text with the hit wrapped in square brackets by FTS5. */
+  snippet: string;
 }

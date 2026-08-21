@@ -9,7 +9,11 @@ export const metadata: Metadata = {
     template: "%s · Markforge",
   },
   description:
-    "Convert PDF, DOCX, PPTX and XLSX documents into clean, structured Markdown. Local-first, private, self-hosted.",
+    "Convert PDF, Office, EPUB and text documents into clean, structured Markdown. Local-first, private, self-hosted.",
+  icons: { icon: "/favicon.svg" },
+  manifest: "/manifest.webmanifest",
+  // The app is local-only; never let a crawler index a LAN-exposed instance.
+  robots: { index: false, follow: false },
 };
 
 export const viewport: Viewport = {

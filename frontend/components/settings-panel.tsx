@@ -23,16 +23,48 @@ function RadioGroup({
   onChange: (value: string) => void;
   name: string;
 }) {
+  const refs = React.useRef<(HTMLButtonElement | null)[]>([]);
+
+  // The ARIA radiogroup pattern is arrow-key driven with a roving tabindex:
+  // the group occupies one tab stop and the options are moved between with the
+  // arrow keys. Declaring the roles without this behaviour is worse than using
+  // plain buttons, because it promises navigation that does not work.
+  const onKeyDown = (event: React.KeyboardEvent, index: number) => {
+    const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+
+    const last = options.length - 1;
+    let next = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = index === last ? 0 : index + 1;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = index === 0 ? last : index - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+
+    onChange(options[next].value);
+    refs.current[next]?.focus();
+  };
+
+  // When nothing is selected the first option takes the tab stop, so the group
+  // is always reachable by keyboard.
+  const selectedIndex = options.findIndex((option) => option.value === value);
+  const tabStop = selectedIndex === -1 ? 0 : selectedIndex;
+
   return (
     <div role="radiogroup" aria-label={name} className="grid gap-2 sm:grid-cols-3">
-      {options.map((option) => {
+      {options.map((option, index) => {
         const active = option.value === value;
         return (
           <button
             key={option.value}
+            ref={(node) => {
+              refs.current[index] = node;
+            }}
             type="button"
             role="radio"
             aria-checked={active}
+            tabIndex={index === tabStop ? 0 : -1}
+            onKeyDown={(event) => onKeyDown(event, index)}
             onClick={() => onChange(option.value)}
             className={cn(
               "flex flex-col items-start gap-0.5 rounded-lg border px-3 py-2.5 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -67,6 +99,7 @@ export function SettingsPanel({ settings, onChange, onSave, saving, compact }: S
     { key: "preserve_boundaries", label: "Page / slide / sheet boundaries", description: "Keep `---` separators between pages, slides and sheets" },
     { key: "convert_tables", label: "Convert tables to Markdown", description: "Render tables as Markdown tables" },
     { key: "preserve_links", label: "Preserve hyperlinks", description: "Keep links as [text](url)" },
+    { key: "extract_images", label: "Extract figures", description: "Save embedded images alongside the Markdown" },
   ];
 
   return (
