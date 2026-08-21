@@ -104,3 +104,72 @@ class TestEngineIsLocalOnly:
         names = [type(r.converter).__name__ for r in build_local_engine()._converters]
         assert names.index("ColumnAwarePdfConverter") < names.index("PdfConverter")
         assert names.index("HeadingPptxConverter") < names.index("PptxConverter")
+
+
+class TestAllowedFormatsHaveTheirDependencies:
+    """Every allowed extension must have its MarkItDown extra installed.
+
+    MarkItDown raises MissingDependencyException from inside convert(), so an
+    extension added to ALLOWED_EXTENSIONS without its extra in requirements.txt
+    passes upload validation and then fails *every* conversion at runtime.
+    This is how `.xls` shipped broken: the allowlist and the registered
+    converter were both updated, but `markitdown[xls]` was not installed.
+    """
+
+    # A byte stub per family, just enough to reach the converter's dependency
+    # check. Parse errors are fine and expected; missing dependencies are not.
+    _OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 512
+    _ZIP = b"PK\x03\x04" + b"\x00" * 64
+    _STUBS = {
+        ".pdf": b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\ntrailer<<>>\n%%EOF\n",
+        ".docx": _ZIP,
+        ".pptx": _ZIP,
+        ".xlsx": _ZIP,
+        ".xls": _OLE2,
+        ".msg": _OLE2,
+        ".epub": _ZIP,
+        ".csv": b"a,b\n1,2\n",
+        ".tsv": b"a\tb\n1\t2\n",
+        ".html": b"<html><body><p>x</p></body></html>",
+        ".htm": b"<html><body><p>x</p></body></html>",
+        ".txt": b"plain text\n",
+        ".md": b"# heading\n",
+        ".json": b'{"a": 1}',
+        ".xml": b"<?xml version='1.0'?><r><i>x</i></r>",
+        ".ipynb": b'{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}',
+    }
+
+    def test_every_allowed_extension_has_its_dependency_installed(self, tmp_path):
+        from app.schemas.settings import ConversionSettings
+        from converters import ALLOWED_EXTENSIONS
+        from converters.base import ConversionContext, ConversionError
+        from converters.markitdown import convert_with_markitdown
+
+        missing_stub = [e for e in ALLOWED_EXTENSIONS if e not in self._STUBS]
+        assert not missing_stub, f"add a stub for {missing_stub} so it is covered"
+
+        broken: list[str] = []
+        for extension in ALLOWED_EXTENSIONS:
+            source = tmp_path / f"sample{extension}"
+            source.write_bytes(self._STUBS[extension])
+            output = tmp_path / f"out{extension.lstrip('.')}"
+            output.mkdir(exist_ok=True)
+            context = ConversionContext(
+                source_path=source,
+                settings=ConversionSettings(),
+                output_dir=output,
+            )
+            try:
+                convert_with_markitdown(context)
+            except ConversionError as exc:
+                # A malformed stub failing to parse is expected. A converter
+                # reporting that its dependency is absent is not.
+                if "MissingDependencyException" in (exc.detail or ""):
+                    broken.append(extension)
+            except Exception:  # noqa: BLE001 - any other failure is a parse issue
+                pass
+
+        assert not broken, (
+            f"these allowed formats have no working converter: {broken}. "
+            "Add the matching MarkItDown extra to backend/requirements.txt."
+        )

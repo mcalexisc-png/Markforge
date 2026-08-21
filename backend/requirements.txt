@@ -12,4 +12,4 @@ python-pptx==1.0.2
 openpyxl==3.1.5
 Pillow==12.3.0
 ocrmypdf==17.10.0
-markitdown[pdf,docx,pptx,xlsx,outlook]==0.1.7
+markitdown[pdf,docx,pptx,xlsx,xls,outlook]==0.1.7
