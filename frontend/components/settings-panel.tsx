@@ -17,11 +17,13 @@ function RadioGroup({
   value,
   onChange,
   name,
+  columns = 3,
 }: {
   options: Option[];
   value: string;
   onChange: (value: string) => void;
   name: string;
+  columns?: number;
 }) {
   const refs = React.useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -51,7 +53,7 @@ function RadioGroup({
   const tabStop = selectedIndex === -1 ? 0 : selectedIndex;
 
   return (
-    <div role="radiogroup" aria-label={name} className="grid gap-2 sm:grid-cols-3">
+    <div role="radiogroup" aria-label={name} className={cn("grid gap-2", columns === 2 ? "sm:grid-cols-2" : "sm:grid-cols-3")}>
       {options.map((option, index) => {
         const active = option.value === value;
         return (
@@ -116,6 +118,7 @@ export function SettingsPanel({ settings, onChange, onSave, saving, compact }: S
           </legend>
           <RadioGroup
             name="output-mode"
+            columns={2}
             value={settings.output_mode}
             onChange={(value) => set("output_mode", value as UserSettings["output_mode"])}
             options={[

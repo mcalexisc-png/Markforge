@@ -24,6 +24,7 @@ ALLOWED_EXTENSIONS = (
     ".docx",
     ".pptx",
     ".xlsx",
+    ".xls",
     ".epub",
     ".msg",
     # Data / text

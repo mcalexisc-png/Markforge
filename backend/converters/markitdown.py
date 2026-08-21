@@ -216,6 +216,7 @@ def build_local_engine(context: ConversionContext | None = None):
         PdfConverter,
         PlainTextConverter,
         PptxConverter,
+        XlsConverter,
         XlsxConverter,
     )
 
@@ -229,6 +230,7 @@ def build_local_engine(context: ConversionContext | None = None):
     for converter in (
         DocxConverter(),
         XlsxConverter(),
+        XlsConverter(),
         PptxConverter(),
         IpynbConverter(),
         PdfConverter(),

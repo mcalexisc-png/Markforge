@@ -194,6 +194,14 @@ def validate_upload(filename: str, size: int, first_bytes: bytes) -> str:
             )
         return declared
 
+    if declared == "xls":
+        if not first_bytes.startswith(_OLE2_MAGIC):
+            raise UploadValidationError(
+                "This file does not look like an Excel .xls spreadsheet.",
+                "not_a_document",
+            )
+        return declared
+
     magic = _magic_format(first_bytes)
     if magic is None:
         raise UploadValidationError(
