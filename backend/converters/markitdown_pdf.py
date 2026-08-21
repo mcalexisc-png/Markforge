@@ -19,6 +19,7 @@ import io
 import re
 import statistics
 
+import pymupdf
 from markitdown._base_converter import DocumentConverterResult
 from markitdown.converters import PdfConverter
 
@@ -26,6 +27,13 @@ _BODY_RATIO = 1.2  # lines >= 1.2x the page's median font size become headings
 _MAX_TITLE_CHARS = 100
 _BOLD_FLAG = 1 << 4  # PyMuPDF span flag for bold text
 _MARKER_LINE_RE = re.compile(r"^(?:[✔✓☑☒●•◦▪‣–—\-]|\d+[.)])$")
+
+# PyMuPDF preserves typographic ligatures (ﬀ, ﬁ, ﬂ, ﬃ, ...) as single glyphs
+# by default, so "Effects" extracts as "Eﬀects" and "Office" as "Oﬃce" --
+# copy-pasted or searched text then silently fails to match the plain-ASCII
+# word a reader typed. Decomposing them back to their component letters is
+# what a person reading the source PDF actually sees.
+_TEXT_DICT_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_LIGATURES
 
 
 def _is_bold(span: dict) -> bool:
@@ -46,7 +54,7 @@ def _wrap_bold(span_text: str) -> str:
 
 def _extract_page(page) -> str:
     """Extract one page as Markdown lines in document (column) order."""
-    data = page.get_text("dict")
+    data = page.get_text("dict", flags=_TEXT_DICT_FLAGS)
     lines: list[tuple[float, str]] = []
     for block in data.get("blocks", []):
         if block.get("type") != 0:

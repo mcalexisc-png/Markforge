@@ -225,6 +225,44 @@ class TestColumnAwarePdf:
         assert "Left column line A\nLeft column line B\nLeft column line C" in md
         assert md.index("Left column line A") < md.index("Right column line A")
 
+    def test_extraction_decomposes_ligatures(self, tmp_path: Path, monkeypatch):
+        """Typographic ligatures (ﬀ, ﬁ, ﬂ, ﬃ) must come out as plain letters.
+
+        Fonts embedded by real PDF export toolchains (PowerPoint, Google
+        Slides, LibreOffice) commonly substitute "ff"/"fi"/"fl" pairs with a
+        single ligature glyph. PyMuPDF preserves that glyph by default, so
+        without the TEXT_PRESERVE_LIGATURES flag cleared, "Effects" extracts
+        as "Eﬀects" and silently fails a reader's search or copy-paste.
+        A base14 test font has no ligature glyphs to reproduce this with, so
+        this asserts the flag itself reaches PyMuPDF rather than depending on
+        font substitution.
+        """
+        import pymupdf
+
+        from converters.markitdown_pdf import _TEXT_DICT_FLAGS
+
+        assert not (_TEXT_DICT_FLAGS & pymupdf.TEXT_PRESERVE_LIGATURES)
+
+        source = make_pdf(tmp_path / "flags.pdf", pages=1)
+        seen_flags: list[int] = []
+        original = pymupdf.Page.get_text
+
+        def spy(self, *args, **kwargs):
+            if args and args[0] == "dict":
+                # PyMuPDF defaults to TEXTFLAGS_DICT (ligatures preserved) when
+                # no ``flags`` kwarg is passed -- that missing kwarg is exactly
+                # what regressed here, so it must count as "ligatures on",
+                # not as an empty/zero flag set.
+                seen_flags.append(kwargs.get("flags", pymupdf.TEXTFLAGS_DICT))
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(pymupdf.Page, "get_text", spy)
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+
+        assert seen_flags, "the page.get_text('dict', ...) call was not exercised"
+        assert all(not (f & pymupdf.TEXT_PRESERVE_LIGATURES) for f in seen_flags)
+
     def test_large_font_promoted_to_heading(self, tmp_path: Path):
         source = make_pdf(tmp_path / "headings.pdf", pages=2)
         context = make_context(source, tmp_path, ocr_mode="never")
