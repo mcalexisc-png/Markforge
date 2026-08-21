@@ -19,6 +19,16 @@ from pathlib import Path
 
 from app.services.ocr import tesseract_available
 from converters.base import ConversionContext, ConversionError
+from converters.images import (
+    DATA_URI_STUB_RE,
+    PAGE_MARKER_RE,
+    append_figures_section,
+    extract_pdf_images,
+    extract_zip_media,
+    flatten,
+    insert_at_markers,
+    replace_data_uri_stubs,
+)
 from converters.markitdown_pdf import ColumnAwarePdfConverter
 from converters.markitdown_pptx import HeadingPptxConverter
 from converters.pdf_helpers import dedupe_duplicate_pages, textless_pages
@@ -32,6 +42,7 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+\S")
 _LIST_RE = re.compile(r"^\s*[-*+]\s+\S|^[●•]\s*\S")
 _TABLE_LINE_RE = re.compile(r"^\s*\|")
 _LINK_RE = re.compile(r"\]\(")
+_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(assets/")
 _CODE_FENCE_RE = re.compile(r"^```")
 _PAGE_MARKER_RE = re.compile(r"<!-- Page (\d+) -->")
 _SLIDE_MARKER_RE = re.compile(r"<!-- Slide number: (\d+) -->")
@@ -152,6 +163,131 @@ def _heuristic_stats(markdown: str, fmt: str) -> DocumentStats:
     return stats
 
 
+# Built-in MarkItDown converters that reach the network. They are never
+# registered. Constructing ``MarkItDown()`` normally calls ``enable_builtins()``,
+# which would register every one of these; the engine below is built with
+# ``enable_builtins=False`` and only local converters are added back by name:
+#
+#   AudioConverter          speech_recognition's ``recognize_google()`` uploads
+#                           the audio to Google's Web Speech API.
+#   YouTubeConverter        }
+#   BingSerpConverter       } fetch remote URLs.
+#   WikipediaConverter      }
+#   RssConverter            }
+#   DocumentIntelligence-   } Azure cloud document APIs (only registered when an
+#   / ContentUnderstanding- } endpoint kwarg is passed, which we never pass).
+#   ImageConverter          only meaningful with an LLM caption client, and
+#                           shells out to exiftool; not needed for our formats.
+#
+# Keeping them unregistered makes egress structurally impossible rather than
+# merely unreachable: a format we do not accept, or one nested inside an
+# archive, still has no converter to land on. ``test_engine_is_local_only``
+# guards this.
+NETWORK_CONVERTER_NAMES = frozenset(
+    {
+        "AudioConverter",
+        "BingSerpConverter",
+        "ContentUnderstandingConverter",
+        "DocumentIntelligenceConverter",
+        "ImageConverter",
+        "RssConverter",
+        "WikipediaConverter",
+        "YouTubeConverter",
+    }
+)
+
+
+def build_local_engine(context: ConversionContext | None = None):
+    """Build a MarkItDown engine with local-only converters registered.
+
+    Registration order matters: MarkItDown tries later registrations first, so
+    the most generic converters must be registered earliest. This mirrors the
+    ordering in MarkItDown's own ``enable_builtins()``, minus every converter
+    listed in :data:`NETWORK_CONVERTER_NAMES`.
+    """
+    from markitdown import PRIORITY_GENERIC_FILE_FORMAT, MarkItDown
+    from markitdown.converters import (
+        CsvConverter,
+        DocxConverter,
+        EpubConverter,
+        HtmlConverter,
+        IpynbConverter,
+        OutlookMsgConverter,
+        PdfConverter,
+        PlainTextConverter,
+        PptxConverter,
+        XlsxConverter,
+    )
+
+    md = MarkItDown(enable_builtins=False)
+
+    # Generic fallbacks first (lowest priority).
+    md.register_converter(PlainTextConverter(), priority=PRIORITY_GENERIC_FILE_FORMAT)
+    md.register_converter(HtmlConverter(), priority=PRIORITY_GENERIC_FILE_FORMAT)
+
+    # Format-specific converters.
+    for converter in (
+        DocxConverter(),
+        XlsxConverter(),
+        PptxConverter(),
+        IpynbConverter(),
+        PdfConverter(),
+        OutlookMsgConverter(),
+        EpubConverter(),
+        CsvConverter(),
+    ):
+        md.register_converter(converter)
+
+    # Ours last so they outrank the stock PDF/PPTX converters.
+    md.register_converter(ColumnAwarePdfConverter())
+    md.register_converter(HeadingPptxConverter(context=context))
+    return md
+
+
+def _attach_images(
+    markdown: str, path: Path, fmt: str, context: ConversionContext
+) -> tuple[str, int]:
+    """Extract figures and anchor them into ``markdown``.
+
+    PPTX is absent here on purpose: its pictures are written inline by
+    :class:`HeadingPptxConverter` while it still has shape order, which no
+    post-pass over the flat text could reconstruct.
+    """
+    if not context.settings.extract_images:
+        return markdown, 0
+
+    if fmt == "pdf":
+        # A scanned page's only "image" is a picture of the text OCR just read,
+        # so extracting it would duplicate the page as an unreadable figure.
+        if context.ocr_used:
+            return markdown, 0
+        by_page = extract_pdf_images(path, context)
+        if not by_page:
+            return markdown, 0
+        count = sum(len(items) for items in by_page.values())
+        if PAGE_MARKER_RE.search(markdown):
+            return insert_at_markers(markdown, by_page, PAGE_MARKER_RE), count
+        return append_figures_section(markdown, flatten(by_page)), count
+
+    if fmt == "docx":
+        # MarkItDown leaves an image stub at each picture's real position, so
+        # figures land inline instead of being herded into a trailing section.
+        markdown, count = replace_data_uri_stubs(
+            markdown, path, context, "word/media/"
+        )
+        if count or DATA_URI_STUB_RE.search(markdown):
+            return markdown, count
+        items = extract_zip_media(path, context, "word/media/")
+        return append_figures_section(markdown, items), len(items)
+
+    if fmt == "xlsx":
+        # Spreadsheets give no positional anchor at all, so figures are grouped.
+        items = extract_zip_media(path, context, "xl/media/")
+        return append_figures_section(markdown, items), len(items)
+
+    return markdown, 0
+
+
 def convert_with_markitdown(context: ConversionContext) -> Document:
     """Convert the context's source file with MarkItDown.
 
@@ -239,13 +375,13 @@ def convert_with_markitdown(context: ConversionContext) -> Document:
             )
 
     try:
-        from markitdown import MarkItDown
-
-        md = MarkItDown()
-        md.register_converter(ColumnAwarePdfConverter())
-        md.register_converter(HeadingPptxConverter())
+        md = build_local_engine(context)
         result = md.convert_local(str(path_for_conversion))
         text = result.text_content or ""
+        # Must happen before the finally block below removes any temp copy, and
+        # must read the file that was actually converted so page numbers line
+        # up with the markers in ``text``.
+        text, image_count = _attach_images(text, path_for_conversion, fmt, context)
     except Exception as exc:
         raise ConversionError(
             "The file could not be converted to Markdown.",
@@ -272,4 +408,17 @@ def convert_with_markitdown(context: ConversionContext) -> Document:
         warnings=warnings,
     )
     doc.stats.ocr_pages = ocr_pages
+    # Count what survived the settings filters rather than what was extracted:
+    # `extract_images=False` removes references that came from the source.
+    doc.stats.images = len(_IMAGE_REF_RE.findall(context.markdown_output))
+    if doc.stats.images:
+        # Append to the document, not the local list: pydantic copied it on
+        # construction above, so a late append there would be discarded.
+        doc.warnings.append(
+            ConversionWarning(
+                code="images_extracted",
+                message=f"{doc.stats.images} figure(s) saved alongside the Markdown.",
+                severity="info",
+            )
+        )
     return doc

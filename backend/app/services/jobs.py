@@ -16,15 +16,13 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.security import safe_stem
 from app.models.job import Job, UploadedFile
 from app.schemas.job import JobFileState, JobOut
 from app.schemas.settings import ConversionSettings
-from app.services import storage
+from app.services import search, storage
 from app.services.storage import job_output_dir, job_upload_dir
 from converters.base import ConversionContext, ConversionError
 from markdown.cleanup import postprocess
@@ -35,6 +33,39 @@ _job_slots = threading.BoundedSemaphore(max(1, settings.max_concurrent_jobs))
 _queue_slots = threading.BoundedSemaphore(8)
 
 _MIN_TIMEOUT = 30
+
+# A conversion that times out leaves its thread running -- Python cannot kill
+# it. Rather than let those accumulate for the process lifetime, they are
+# counted and new work is refused once too many are stuck, so the failure mode
+# is a clear error instead of unbounded memory growth.
+_MAX_ABANDONED = 8
+_abandoned_lock = threading.Lock()
+_abandoned_conversions = 0
+
+
+class QueueFullError(RuntimeError):
+    """Raised when no in-process slot is available to run a job."""
+
+
+class ConversionCapacityError(RuntimeError):
+    """Raised when too many timed-out conversion threads are still stuck."""
+
+
+def _note_abandoned_thread() -> None:
+    global _abandoned_conversions
+    with _abandoned_lock:
+        _abandoned_conversions += 1
+        total = _abandoned_conversions
+    logger.error(
+        "Conversion timed out; its worker thread cannot be killed and was "
+        "abandoned (%d stuck since start). Restart the backend to reclaim it.",
+        total,
+    )
+
+
+def abandoned_conversions() -> int:
+    with _abandoned_lock:
+        return _abandoned_conversions
 
 
 def _now() -> datetime:
@@ -61,6 +92,11 @@ def create_job(file_ids: list[str], settings_dict: dict) -> Job:
         if missing:
             raise ValueError(f"Unknown uploaded files: {missing}")
 
+        # Preserve the order the user chose. The query above returns rows in
+        # primary-key order, and ids are random hex, so iterating it directly
+        # would shuffle the workspace tabs and the ZIP contents.
+        ordered = [by_id[fid] for fid in file_ids]
+
         job_id = storage.new_job_id()
         converted_settings = ConversionSettings(**settings_dict)
         job = Job(
@@ -77,7 +113,7 @@ def create_job(file_ids: list[str], settings_dict: dict) -> Job:
                         "format": f.format,
                         "sha256": f.sha256,
                     }
-                    for f in files
+                    for f in ordered
                 ]
             ),
             items_json=json.dumps(
@@ -94,10 +130,11 @@ def create_job(file_ids: list[str], settings_dict: dict) -> Job:
                         "stats": {},
                         "output_dir": None,
                         "markdown_filename": None,
+                        "output_size": 0,
                         "ocr_used": False,
                         "error": None,
                     }
-                    for f in files
+                    for f in ordered
                 ]
             ),
             settings_json=json.dumps(converted_settings.model_dump()),
@@ -153,10 +190,15 @@ def dispatch_job(job_id: str) -> None:
         celery_app.send_task("markforge.process_job", args=[job_id])
         logger.info("Dispatched job %s to Celery", job_id)
     else:
+        if abandoned_conversions() >= _MAX_ABANDONED:
+            raise ConversionCapacityError(
+                "Too many conversions have timed out and their workers are "
+                "still stuck. Restart the backend to recover."
+            )
         if not _queue_slots.acquire(blocking=False):
-            raise HTTPException(
-                status_code=409,
-                detail="Too many conversions are already waiting to run. Please wait a moment and try again.",
+            raise QueueFullError(
+                "Too many conversions are already waiting to run. "
+                "Please wait a moment and try again."
             )
         threading.Thread(target=_run_job_with_slot, args=[job_id], daemon=True).start()
         logger.info("Dispatched job %s in-process", job_id)
@@ -300,16 +342,25 @@ def _process_item(job_id: str, item: dict, settings_dict: dict, used_stems: set[
         if not original_path.exists():
             original_path.write_text(markdown, encoding="utf-8")
 
-        warnings = [w for w in document.warnings if isinstance(w, dict)] or [
-            {"code": w.code, "message": w.message, "detail": w.detail, "severity": w.severity}
+        search.index_document(job_id, item["file_id"], item["filename"], markdown)
+
+        item["warnings"] = [
+            {
+                "code": w.code,
+                "message": w.message,
+                "detail": w.detail,
+                "severity": w.severity,
+            }
             for w in document.warnings
         ]
-        item["warnings"] = warnings
         item["stats"] = document.stats.model_dump()
         item["status"] = "completed"
         item["progress"] = 100.0
         item["phase"] = "Completed"
         item["markdown_filename"] = "document.md"
+        item["output_size"] = sum(
+            f.stat().st_size for f in output_dir.rglob("*") if f.is_file()
+        )
         item["ocr_used"] = context.ocr_used
         _update_item(job_id, item)
         return "completed"
@@ -360,6 +411,7 @@ def _run_with_timeout(fn):
     except FutureTimeout:
         future.cancel()
         pool.shutdown(wait=False, cancel_futures=True)
+        _note_abandoned_thread()
         raise
     finally:
         pool.shutdown(wait=False)
@@ -443,6 +495,7 @@ def save_markdown(job_id: str, file_id: str | None, content: str) -> None:
         if not markdown_path.exists():
             raise ValueError("Result file missing.")
         markdown_path.write_text(content, encoding="utf-8")
+        search.index_document(job_id, item["file_id"], item.get("filename", ""), content)
         item["edited"] = True
         job.items_json = json.dumps(items, ensure_ascii=False)
         db.commit()
@@ -477,6 +530,7 @@ def delete_job(job_id: str) -> None:
             db.commit()
     finally:
         db.close()
+    search.remove_job(job_id)
     storage.delete_job_storage(job_id)
 
 

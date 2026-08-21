@@ -6,8 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from document_model.blocks import BlockUnion
-
 
 class ConversionWarning(BaseModel):
     """A factual, user-facing note about a conversion limitation."""
@@ -38,12 +36,17 @@ class DocumentStats(BaseModel):
 
 
 class Document(BaseModel):
-    """A converted document in the Common Document Model."""
+    """A converted document: metadata, stats and any conversion warnings.
+
+    The MarkItDown engine emits Markdown text directly, so there is no block
+    tree here. The typed block hierarchy this model used to carry was left
+    unused by that migration and has been removed rather than kept as dead
+    weight; the Markdown itself lives on the ConversionContext.
+    """
 
     format: str
     filename: str
     metadata: dict[str, str] = Field(default_factory=dict)
-    blocks: list[BlockUnion] = Field(default_factory=list)
     warnings: list[ConversionWarning] = Field(default_factory=list)
     stats: DocumentStats = Field(default_factory=DocumentStats)
     extra: dict[str, Any] = Field(default_factory=dict)

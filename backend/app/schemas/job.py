@@ -36,6 +36,9 @@ class JobFileState(BaseModel):
     stats: dict[str, int] = Field(default_factory=dict)
     output_dir: str | None = None
     markdown_filename: str | None = None
+    # Bytes written for this result, recorded once at completion so the history
+    # endpoint does not have to walk the filesystem on every poll.
+    output_size: int = 0
     ocr_used: bool = False
     edited: bool = False
     error: dict[str, Any] | None = None

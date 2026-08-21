@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     lan_mode: bool = False
+    # Extra allowed CORS origins, comma separated. Localhost dev origins are
+    # always allowed; this is for reaching the API directly over a LAN.
+    cors_origins: str = ""
     lan_password: str = ""
 
     job_mode: str = "sync"
@@ -40,6 +43,11 @@ class Settings(BaseSettings):
     job_timeout: int = 900
     max_concurrent_jobs: int = 2
     worker_concurrency: int = 2
+
+    # Base directory for everything else. When set, the five paths below are
+    # derived from it unless a path is overridden explicitly. This is the one
+    # knob a container deployment needs: point it at the mounted volume.
+    data_dir: str = ""
 
     storage_dir: str = "storage"
     database_path: str = "storage/markforge.db"
@@ -50,6 +58,9 @@ class Settings(BaseSettings):
     cleanup_interval: int = 3600
 
     max_file_size: int = 100 * 1024 * 1024
+    # Friendlier alias for max_file_size. When set it wins, so deployments can
+    # say "100" instead of counting bytes.
+    max_file_mb: int | None = None
     max_files_per_job: int = 25
     secret_key: str = _DEFAULT_SECRET
 
@@ -70,20 +81,40 @@ class Settings(BaseSettings):
             path = (REPO_ROOT / path).resolve()
         return path
 
+    def _path_for(self, field: str, relative_to_data: str) -> Path:
+        """Resolve one storage path.
+
+        An explicitly configured value always wins. Otherwise, when
+        ``data_dir`` is set the path is derived from it -- which is what keeps
+        a container's data on its mounted volume instead of scattering it
+        relative to the code.
+        """
+        if field in self.model_fields_set:
+            return self._resolve(getattr(self, field))
+        if self.data_dir:
+            return self._resolve(self.data_dir) / relative_to_data
+        return self._resolve(getattr(self, field))
+
+    @property
+    def effective_max_file_size(self) -> int:
+        if self.max_file_mb is not None:
+            return max(1, self.max_file_mb) * 1024 * 1024
+        return self.max_file_size
+
     def resolve_storage_dir(self) -> Path:
-        return self._resolve(self.storage_dir)
+        return self._path_for("storage_dir", "storage")
 
     def resolve_database_path(self) -> Path:
-        return self._resolve(self.database_path)
+        return self._path_for("database_path", "markforge.db")
 
     def resolve_upload_dir(self) -> Path:
-        return self._resolve(self.upload_dir)
+        return self._path_for("upload_dir", "uploads")
 
     def resolve_output_dir(self) -> Path:
-        return self._resolve(self.output_dir)
+        return self._path_for("output_dir", "outputs")
 
     def resolve_temp_dir(self) -> Path:
-        return self._resolve(self.temp_dir)
+        return self._path_for("temp_dir", "temp")
 
     def cookie_secret(self) -> str:
         """The key used to sign LAN access cookies.

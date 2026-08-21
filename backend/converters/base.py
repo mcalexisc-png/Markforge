@@ -1,21 +1,17 @@
-"""Converter base classes, shared context and errors.
+"""Shared conversion context and errors.
 
-All format converters implement :class:`BaseConverter` and emit a
-:class:`Document` through a :class:`ConversionContext`, which owns asset
-writing, progress reporting and warning collection.
+The MarkItDown adapter drives conversion; this module supplies the
+:class:`ConversionContext` it runs against, which owns asset writing,
+progress reporting and the resulting Markdown.
 """
 
 from __future__ import annotations
 
 import hashlib
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
 
 from app.schemas.settings import ConversionSettings
-from document_model.document import Document, DocumentStats
-from document_model.metadata import normalize_metadata
 
 ProgressCallback = Callable[[str, int, int, str], None]
 
@@ -96,38 +92,3 @@ class ConversionContext:
         rel = f"assets/{name}"
         self._seen_assets[digest] = rel
         return rel
-
-
-class BaseConverter(ABC):
-    """Interface every format converter implements."""
-
-    format: ClassVar[str] = "unknown"
-    extensions: ClassVar[tuple[str, ...]] = ()
-
-    def __init__(self, context: ConversionContext):
-        self.context = context
-
-    @classmethod
-    def supports(cls, ext: str) -> bool:
-        return ext.lower() in cls.extensions
-
-    @abstractmethod
-    def convert(self) -> Document:
-        """Parse the source file and return a Document in the CDM."""
-
-    def _build_document(self, metadata: dict) -> Document:
-        return Document(
-            format=self.format,
-            filename=self.context.source_path.name,
-            metadata=normalize_metadata(metadata),
-            stats=DocumentStats(),
-        )
-
-    def warn(self, code: str, message: str, detail: str | None = None) -> None:
-        self._last_doc.warnings.append(
-            {"code": code, "message": message, "detail": detail, "severity": "warning"}
-        )
-
-    def _track(self, doc: Document) -> Document:
-        self._last_doc = doc
-        return doc

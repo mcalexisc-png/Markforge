@@ -15,6 +15,7 @@ class ConversionSettings(BaseModel):
     preserve_boundaries: bool = True
     convert_tables: bool = True
     preserve_links: bool = True
+    extract_images: bool = True
 
 
 class UserSettings(BaseModel):
@@ -25,6 +26,7 @@ class UserSettings(BaseModel):
     preserve_boundaries: bool = True
     convert_tables: bool = True
     preserve_links: bool = True
+    extract_images: bool = True
 
 
 DEFAULT_SETTINGS = UserSettings()

@@ -1,4 +1,6 @@
 -r requirements.txt
 pytest==9.1.1
 ruff==0.16.3
+# Starlette >= 0.5x imports `httpx2` in preference to `httpx` (see
+# starlette/testclient.py); this is the package TestClient actually uses.
 httpx2==2.12.0

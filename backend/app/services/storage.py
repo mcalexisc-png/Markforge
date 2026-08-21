@@ -11,6 +11,7 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models.job import Job, UploadedFile
+from app.services import search
 
 
 def ensure_dirs() -> None:
@@ -113,6 +114,9 @@ def run_retention(now: datetime | None = None) -> tuple[int, int]:
         if _newest_mtime(job_dir) < cutoff:
             freed += dir_size(job_dir)
             shutil.rmtree(job_dir, ignore_errors=True)
+            # The index points at files that no longer exist; drop it with them
+            # or search will return hits that cannot be opened.
+            search.remove_job(job_dir.name)
             deleted += 1
     prune_uploaded_files()
     return deleted, freed

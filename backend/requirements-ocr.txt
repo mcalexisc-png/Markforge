@@ -1,3 +1,4 @@
 -r requirements.txt
+# ocrmypdf is already pinned in requirements.txt; only the Tesseract binding
+# is extra here. The `tesseract` binary must also be installed on the host.
 pytesseract>=0.3.13
-ocrmypdf>=16.0

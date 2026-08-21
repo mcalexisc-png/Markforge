@@ -16,6 +16,8 @@ import pptx
 from markitdown._base_converter import DocumentConverterResult
 from markitdown.converters import PptxConverter
 
+from converters.images import is_decorative
+
 _BODY_RATIO = 1.2
 _MAX_TITLE_CHARS = 120
 
@@ -41,7 +43,44 @@ def _iter_shapes(slide):
 
 
 class HeadingPptxConverter(PptxConverter):
-    """PPTX converter that promotes large-font text boxes to headings."""
+    """PPTX converter that promotes large-font text boxes to headings.
+
+    When a :class:`ConversionContext` is supplied, pictures are also written to
+    the job's ``assets/`` directory and referenced inline. Doing it here rather
+    than in a post-pass is what keeps each figure in its real slide position:
+    this is the only point in the pipeline that still walks shapes in order.
+    """
+
+    def __init__(self, context=None, **kwargs):
+        super().__init__(**kwargs)
+        self._context = context
+
+    def _picture_markdown(self, shape, alt_text: str) -> str | None:
+        """Markdown for a picture shape, or None to use the legacy placeholder.
+
+        Returns an empty string for a picture that extraction deliberately
+        discarded: a logo or spacer should leave nothing behind, not an
+        ``[Image: ...]`` line that is pure noise in the output.
+        """
+        context = self._context
+        if context is None or not getattr(context.settings, "extract_images", False):
+            return None
+        try:
+            image = shape.image
+            data = image.blob
+            ext = (image.ext or "png").lower()
+            width, height = image.size
+        except Exception:
+            return None
+        if is_decorative(int(width), int(height), len(data)):
+            return ""
+        try:
+            rel = context.save_image(data, ext)
+        except OSError:
+            return None
+        if not rel:
+            return None
+        return f"\n![{alt_text or 'Slide image'}]({rel})\n"
 
     def convert(self, file_stream, stream_info, **kwargs):
         presentation = pptx.Presentation(file_stream)
@@ -68,6 +107,10 @@ class HeadingPptxConverter(PptxConverter):
                     with contextlib.suppress(Exception):
                         alt_text = shape._element._nvXxPr.cNvPr.attrib.get("descr", "")
                     alt_text = _re_sub_whitespace(alt_text)
+                    rendered = self._picture_markdown(shape, alt_text)
+                    if rendered is not None:
+                        md_content += rendered
+                        return
                     if kwargs.get("keep_data_uris", False):
                         with contextlib.suppress(Exception):
                             content_type, b64_string = _image_data_uri(shape)

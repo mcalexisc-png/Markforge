@@ -10,17 +10,24 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import routes_auth, routes_files, routes_health, routes_jobs, routes_settings
+from app.api import (
+    routes_auth,
+    routes_files,
+    routes_health,
+    routes_jobs,
+    routes_search,
+    routes_settings,
+)
 from app.core.config import settings
 from app.core.db import SessionLocal, init_db
 from app.core.logging import configure_logging
 from app.core.security import verify_token
 from app.models.job import RetentionLog
-from app.services import storage
+from app.services import search, storage
 
 logger = logging.getLogger("markforge.app")
 
@@ -57,6 +64,10 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.log_level)
     init_db()
     storage.ensure_dirs()
+    search.init_index()
+    # Installs that converted documents before search existed have results
+    # on disk but no index rows; catch them up once at startup.
+    search.backfill_missing()
     task = asyncio.create_task(_cleanup_loop())
     if settings.lan_mode:
         if not settings.lan_password:
@@ -88,11 +99,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# The frontend proxies /api through its own origin, so cross-origin access is
+# not part of normal operation. A wildcard is broader than a local-first app
+# needs; allow the dev origins plus anything explicitly configured.
+_DEFAULT_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_extra_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_DEFAULT_ORIGINS + _extra_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type"],
     expose_headers=["Content-Disposition"],
 )
 
@@ -114,6 +135,7 @@ async def lan_access_middleware(request: Request, call_next):
 app.include_router(routes_files.router)
 app.include_router(routes_jobs.router)
 app.include_router(routes_settings.router)
+app.include_router(routes_search.router)
 app.include_router(routes_auth.router)
 app.include_router(routes_health.router)
 
@@ -126,4 +148,9 @@ async def root() -> dict:
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s", request.url.path)
-    return Response(status_code=500, content="Internal server error")
+    # JSON with a `detail` key, matching every other error the API returns --
+    # a plain-text body left the frontend's error parser with nothing to show.
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error."},
+    )
