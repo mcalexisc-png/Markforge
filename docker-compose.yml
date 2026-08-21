@@ -5,7 +5,7 @@ services:
       dockerfile: docker/Dockerfile.backend
     container_name: markforge-backend
     environment:
-      MARKFORGE_ENV: production
+      MARKFORGE_APP_ENV: production
       MARKFORGE_HOST: 0.0.0.0
       MARKFORGE_JOB_MODE: ${JOB_MODE:-sync}
       MARKFORGE_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -58,7 +58,7 @@ services:
     profiles: ["celery"]
     command: ["celery", "-A", "workers.celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
     environment:
-      MARKFORGE_ENV: production
+      MARKFORGE_APP_ENV: production
       MARKFORGE_JOB_MODE: celery
       MARKFORGE_REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
