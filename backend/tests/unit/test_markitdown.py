@@ -31,7 +31,13 @@ def make_context(source: Path, tmp_path: Path, **overrides) -> ConversionContext
     )
 
 
-def assert_text_only(markdown: str) -> None:
+def assert_no_figures(markdown: str) -> None:
+    """These fixtures embed no images, so no figure should be referenced.
+
+    Image extraction is on by default, so this now guards against inventing
+    references rather than against extraction itself. Figure extraction has its
+    own coverage in :class:`TestImageExtraction`.
+    """
     assert markdown
     assert "![" not in markdown
     assert "assets/" not in markdown
@@ -45,7 +51,7 @@ class TestMarkitdownEngine:
         assert isinstance(doc, Document)
         assert doc.format == "pdf"
         assert context.markdown_output
-        assert_text_only(context.markdown_output)
+        assert_no_figures(context.markdown_output)
         assert doc.stats.headings >= 0
         assert len(doc.warnings) == 0
 
@@ -55,7 +61,7 @@ class TestMarkitdownEngine:
         doc = convert_with_markitdown(context)
         assert doc.format == "docx"
         assert context.markdown_output
-        assert_text_only(context.markdown_output)
+        assert_no_figures(context.markdown_output)
 
     def test_pptx_conversion(self, tmp_path: Path):
         source = make_pptx(tmp_path / "deck.pptx", slides=3)
@@ -63,7 +69,7 @@ class TestMarkitdownEngine:
         doc = convert_with_markitdown(context)
         assert doc.format == "pptx"
         assert context.markdown_output
-        assert_text_only(context.markdown_output)
+        assert_no_figures(context.markdown_output)
 
     def test_xlsx_conversion(self, tmp_path: Path):
         source = make_xlsx(tmp_path / "book.xlsx", sheets=2)
@@ -71,9 +77,11 @@ class TestMarkitdownEngine:
         doc = convert_with_markitdown(context)
         assert doc.format == "xlsx"
         assert context.markdown_output
-        assert_text_only(context.markdown_output)
+        assert_no_figures(context.markdown_output)
 
-    def test_pptx_pictures_become_placeholders(self, tmp_path: Path):
+    def test_pptx_pictures_become_placeholders_when_extraction_is_off(
+        self, tmp_path: Path
+    ):
         from io import BytesIO
 
         from PIL import Image
@@ -89,12 +97,11 @@ class TestMarkitdownEngine:
         slide.shapes.add_picture(buffer, 0, 0)
         prs.save(source)
 
-        context = make_context(source, tmp_path)
+        context = make_context(source, tmp_path, extract_images=False)
         convert_with_markitdown(context)
         out = context.markdown_output
         assert out
         assert "![" not in out
-        assert "].jpg" not in out
         assert "[Image: image.png]" in out
 
     def test_stats_count_pages_slides_sheets(self, tmp_path: Path):
@@ -372,3 +379,286 @@ class TestPptxHeadings:
         convert_with_markitdown(context)
         md = context.markdown_output
         assert "# Introduction" in md
+
+def _write(path: Path, data: bytes | str) -> Path:
+    path.write_bytes(data.encode("utf-8") if isinstance(data, str) else data)
+    return path
+
+
+def make_epub(path: Path) -> Path:
+    """Minimal but valid EPUB 3 package."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" '
+            'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="OEBPS/content.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" '
+            'version="3.0" unique-identifier="id"><metadata '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test Book</dc:title>'
+            "<dc:creator>An Author</dc:creator>"
+            '<dc:identifier id="id">urn:uuid:1</dc:identifier>'
+            "<dc:language>en</dc:language></metadata><manifest>"
+            '<item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>'
+            '</manifest><spine><itemref idref="c1"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/c1.xhtml",
+            '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<h1>Chapter One</h1><p>Body text of the chapter.</p></body></html>",
+        )
+    return path
+
+
+class TestExpandedFormats:
+    """Every extension in ALLOWED_EXTENSIONS must actually convert.
+
+    The allowlist and the registered converters are two halves of one contract;
+    widening one without the other fails at conversion time instead of upload.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "content", "expected"),
+        [
+            ("page.html", "<html><body><h1>Title</h1><p>Body</p></body></html>", "# Title"),
+            ("page.htm", "<html><body><h2>Sub</h2></body></html>", "## Sub"),
+            ("notes.txt", "plain text line\nsecond line\n", "plain text line"),
+            ("notes.md", "# Heading\n\n- a\n- b\n", "# Heading"),
+            ("data.csv", "name,score\nAda,99\nGrace,100\n", "| Ada | 99 |"),
+            ("data.tsv", "name\tscore\nAda\t99\n", "Ada"),
+            ("data.json", '{"a": 1, "b": [1, 2]}', '"a"'),
+            ("data.xml", "<?xml version='1.0'?><root><item>x</item></root>", "item"),
+        ],
+    )
+    def test_text_family_converts(self, tmp_path: Path, name, content, expected):
+        source = _write(tmp_path / name, content)
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+        assert isinstance(doc, Document)
+        assert expected in context.markdown_output
+
+    def test_ipynb_converts_cells(self, tmp_path: Path):
+        import json
+
+        notebook = {
+            "cells": [
+                {"cell_type": "markdown", "metadata": {}, "source": ["# NB Title"]},
+                {
+                    "cell_type": "code",
+                    "execution_count": 1,
+                    "metadata": {},
+                    "outputs": [],
+                    "source": ["print('hi')"],
+                },
+            ],
+            "metadata": {
+                "kernelspec": {
+                    "display_name": "Python 3",
+                    "language": "python",
+                    "name": "python3",
+                }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+        source = _write(tmp_path / "nb.ipynb", json.dumps(notebook))
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        assert "# NB Title" in context.markdown_output
+        assert "print('hi')" in context.markdown_output
+
+    def test_epub_converts_with_metadata(self, tmp_path: Path):
+        source = make_epub(tmp_path / "book.epub")
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        assert "Test Book" in context.markdown_output
+        assert "Chapter One" in context.markdown_output
+
+
+def _png(width: int, height: int, color=(40, 120, 200)) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (width, height), color)
+    # A little internal structure so the file does not compress to nothing and
+    # trip the MIN_BYTES branch of the decorative filter.
+    ImageDraw.Draw(image).ellipse(
+        (width * 0.1, height * 0.1, width * 0.9, height * 0.9), fill=(250, 210, 70)
+    )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def make_figure_pdf(path: Path, pages: int = 2, decorations: bool = True) -> Path:
+    """A PDF with one real figure per page, plus decorative noise."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    for number in range(1, pages + 1):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"Chapter {number}: findings and discussion")
+        page.insert_image(
+            pymupdf.Rect(72, 110, 400, 350),
+            stream=_png(500, 360, (20, 80 + number * 30, 190)),
+        )
+        if decorations:
+            # A hairline rule and a spacer pixel: both must be filtered out.
+            page.insert_image(
+                pymupdf.Rect(72, 700, 500, 703), stream=_png(600, 4, (10, 10, 10))
+            )
+            page.insert_image(
+                pymupdf.Rect(520, 40, 523, 43), stream=_png(3, 3, (10, 10, 10))
+            )
+    doc.save(path)
+    doc.close()
+    return path
+
+
+class TestImageExtraction:
+    def test_pdf_figures_are_anchored_to_their_page(self, tmp_path: Path):
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=3)
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+
+        assert doc.stats.images == 3
+        out = context.markdown_output
+        for page_number in (1, 2, 3):
+            marker = f"<!-- Page {page_number} -->"
+            after = out.index(marker) + len(marker)
+            # The figure must follow its own page marker, before the next one.
+            nxt = out.find("<!-- Page ", after)
+            segment = out[after:] if nxt == -1 else out[after:nxt]
+            assert "](assets/" in segment, f"page {page_number} lost its figure"
+
+    def test_decorative_images_are_filtered_out(self, tmp_path: Path):
+        source = make_figure_pdf(tmp_path / "noisy.pdf", pages=2)
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+        # Two real figures; the rules and spacer pixels must not survive.
+        assert doc.stats.images == 2
+
+    def test_assets_are_written_to_the_output_directory(self, tmp_path: Path):
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+
+        assets = sorted((context.output_dir / "assets").glob("*"))
+        assert [a.name for a in assets] == ["image-001.png", "image-002.png"]
+        assert all(a.stat().st_size > 0 for a in assets)
+
+    def test_repeated_image_is_saved_once(self, tmp_path: Path):
+        """A logo on every page should cost one file, not one per page."""
+        import pymupdf
+
+        logo = _png(300, 200, (90, 90, 200))
+        source = tmp_path / "logo.pdf"
+        doc = pymupdf.open()
+        for number in range(1, 5):
+            page = doc.new_page()
+            # Unique text per page, or the duplicate-page pre-pass collapses
+            # them and this stops testing image dedup at all.
+            page.insert_text((72, 72), f"Section {number} body text")
+            page.insert_image(pymupdf.Rect(72, 100, 272, 233), stream=logo)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        assets = list((context.output_dir / "assets").glob("*"))
+        assert len(assets) == 1
+        assert context.markdown_output.count("](assets/") == 4
+
+    def test_extraction_can_be_turned_off(self, tmp_path: Path):
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
+        context = make_context(source, tmp_path, extract_images=False)
+        doc = convert_with_markitdown(context)
+
+        assert doc.stats.images == 0
+        assert "](assets/" not in context.markdown_output
+        assert not (context.output_dir / "assets").exists()
+
+    def test_figures_survive_preserve_links_off(self, tmp_path: Path):
+        """Turning off links must not silently delete the document's figures."""
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
+        context = make_context(source, tmp_path, preserve_links=False)
+        doc = convert_with_markitdown(context)
+        assert doc.stats.images == 2
+
+    def test_extraction_reports_a_warning(self, tmp_path: Path):
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+        assert any(w.code == "images_extracted" for w in doc.warnings)
+
+    def test_docx_figures_are_placed_inline(self, tmp_path: Path):
+        from io import BytesIO
+
+        import docx
+        from docx.shared import Inches
+
+        source = tmp_path / "report.docx"
+        document = docx.Document()
+        document.add_heading("Report", level=1)
+        document.add_paragraph("Before the figure.")
+        document.add_picture(BytesIO(_png(520, 340)), width=Inches(4))
+        document.add_paragraph("Between the figures.")
+        document.add_picture(BytesIO(_png(500, 320, (40, 160, 90))), width=Inches(4))
+        document.add_paragraph("After the figure.")
+        document.save(source)
+
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+        out = context.markdown_output
+
+        assert doc.stats.images == 2
+        # Inline placement: each figure sits between its neighbouring paragraphs.
+        assert out.index("Before the figure.") < out.index("](assets/")
+        assert out.index("](assets/") < out.index("Between the figures.")
+        assert out.index("Between the figures.") < out.rindex("](assets/")
+        assert out.rindex("](assets/") < out.index("After the figure.")
+        # The stub MarkItDown leaves behind must be fully consumed.
+        assert "data:image" not in out
+
+    def test_pptx_picture_is_saved_and_referenced(self, tmp_path: Path):
+        from io import BytesIO
+
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        source = tmp_path / "deck.pptx"
+        prs = Presentation()
+        first = prs.slides.add_slide(prs.slide_layouts[5])
+        first.shapes.title.text = "Deck"
+        second = prs.slides.add_slide(prs.slide_layouts[5])
+        second.shapes.title.text = "Architecture"
+        second.shapes.add_picture(
+            BytesIO(_png(480, 320)), Inches(1), Inches(2), Inches(4), Inches(2.6)
+        )
+        # A spacer that must leave nothing at all behind.
+        second.shapes.add_picture(
+            BytesIO(_png(6, 6, (0, 0, 0))),
+            Inches(6),
+            Inches(0.4),
+            Inches(0.1),
+            Inches(0.1),
+        )
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        doc = convert_with_markitdown(context)
+        out = context.markdown_output
+
+        assert doc.stats.images == 1
+        assert "](assets/" in out
+        assert "[Image:" not in out
+        # The figure belongs to slide 2, not slide 1.
+        assert out.index("<!-- Slide number: 2 -->") < out.index("](assets/")

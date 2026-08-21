@@ -73,3 +73,34 @@ class TestTokens:
     def test_secure_compare(self):
         assert secure_compare("abc", "abc")
         assert not secure_compare("abc", "abd")
+
+
+class TestEngineIsLocalOnly:
+    """The conversion engine must never register a converter that egresses.
+
+    MarkItDown's default ``enable_builtins()`` registers an audio converter
+    that uploads audio to Google's Web Speech API, several URL fetchers, and
+    two Azure cloud converters. ``build_local_engine`` opts out of builtins
+    entirely and adds back only local converters, so an unsupported format --
+    or one nested inside an archive -- has no converter to land on.
+    """
+
+    def test_no_network_converter_is_registered(self):
+        from converters.markitdown import NETWORK_CONVERTER_NAMES, build_local_engine
+
+        engine = build_local_engine()
+        registered = {type(r.converter).__name__ for r in engine._converters}
+        assert not (registered & NETWORK_CONVERTER_NAMES)
+
+    def test_builtins_are_not_enabled(self):
+        from converters.markitdown import build_local_engine
+
+        assert build_local_engine()._builtins_enabled is False
+
+    def test_custom_converters_outrank_stock_ones(self):
+        """Ours are registered last, so they are tried first."""
+        from converters.markitdown import build_local_engine
+
+        names = [type(r.converter).__name__ for r in build_local_engine()._converters]
+        assert names.index("ColumnAwarePdfConverter") < names.index("PdfConverter")
+        assert names.index("HeadingPptxConverter") < names.index("PptxConverter")

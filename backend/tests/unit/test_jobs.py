@@ -6,7 +6,6 @@ import threading
 import time
 
 import pytest
-from fastapi import HTTPException
 
 from app.services import jobs as jobs_module
 from app.services.jobs import _run_with_timeout
@@ -62,9 +61,10 @@ class TestConcurrencyCap:
         monkeypatch.setattr(jobs_module, "_queue_slots", threading.BoundedSemaphore(1))
         assert jobs_module._queue_slots.acquire(blocking=False)
 
-        with pytest.raises(HTTPException) as err:
+        # The service layer raises a domain error; mapping it to 409 is the
+        # route's job (see TestQueueOverflow in the integration suite).
+        with pytest.raises(jobs_module.QueueFullError):
             jobs_module.dispatch_job("some-job")
-        assert err.value.status_code == 409
 
         jobs_module._queue_slots.release()
         # With a free queue slot the dispatch itself must not raise, even for
@@ -80,3 +80,41 @@ class TestConcurrencyCap:
             time.sleep(0.01)
         assert released, "the finished worker thread must free its queue slot"
         jobs_module._queue_slots.release()
+
+class TestJobFileOrder:
+    def test_items_follow_the_order_the_user_chose(self, tmp_path):
+        """Workspace tabs and ZIP contents must match the upload order.
+
+        ``create_job`` looks the files up with a single ``IN`` query, which
+        returns them in primary-key order. Ids are random hex, so iterating the
+        query result directly shuffles the job relative to what the user picked.
+        """
+        import uuid
+
+        from app.core.db import SessionLocal
+        from app.models.job import UploadedFile
+        from app.services import jobs as job_service
+
+        db = SessionLocal()
+        try:
+            # Insert with ids that sort the opposite way to insertion order, so
+            # a regression cannot pass by accident.
+            ids = ["zzz" + uuid.uuid4().hex[:9], "aaa" + uuid.uuid4().hex[:9]]
+            for index, file_id in enumerate(ids):
+                db.add(
+                    UploadedFile(
+                        id=file_id,
+                        name=f"file{index}.pdf",
+                        size=10,
+                        format="pdf",
+                        sha256=uuid.uuid4().hex,
+                    )
+                )
+            db.commit()
+        finally:
+            db.close()
+
+        job = job_service.create_job(ids, {})
+        out = job_service.to_job_out(job)
+        assert [f.id for f in out.files] == ids
+        assert [item.file_id for item in out.items] == ids

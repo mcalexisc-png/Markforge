@@ -1,4 +1,4 @@
-"""Unit tests for the Common Document Model."""
+"""Unit tests for the conversion result model."""
 
 from __future__ import annotations
 
@@ -8,69 +8,61 @@ from pydantic import ValidationError
 from document_model import (
     ConversionWarning,
     Document,
-    HeadingBlock,
-    PageBreakBlock,
-    ParagraphBlock,
-    TableBlock,
-    TableCell,
-    TableRow,
-    TextRun,
+    DocumentStats,
+    normalize_metadata,
 )
 
 
-class TestDocumentModel:
+class TestDocument:
     def test_build_document(self):
-        doc = Document(
-            format="pdf",
-            filename="a.pdf",
-            metadata={"title": "T"},
-            blocks=[
-                HeadingBlock(level=1, content=[TextRun(text="Title")]),
-                ParagraphBlock(content=[TextRun(text="Body", bold=True)]),
-            ],
-        )
-        assert doc.blocks[0].type == "heading"
-        assert doc.blocks[0].level == 1
-        assert doc.blocks[1].content[0].bold is True
+        doc = Document(format="pdf", filename="report.pdf")
+        assert doc.format == "pdf"
+        assert doc.filename == "report.pdf"
+        assert doc.metadata == {}
+        assert doc.warnings == []
+        assert doc.extra == {}
 
-    def test_discriminated_union(self):
-        doc = Document(
-            format="docx",
-            filename="a.docx",
-            blocks=[
-                {"type": "page_break", "page_number": 3},
-                {"type": "paragraph", "content": [{"text": "hi"}]},
-            ],
-        )
-        assert isinstance(doc.blocks[0], PageBreakBlock)
-        assert doc.blocks[0].page_number == 3
-        assert isinstance(doc.blocks[1], ParagraphBlock)
+    def test_has_no_block_tree(self):
+        """The MarkItDown engine emits Markdown text, not typed blocks.
 
-    def test_invalid_type_rejected(self):
+        The old block hierarchy went unused after that migration and was
+        removed; this guards against it being reintroduced by accident.
+        """
+        assert "blocks" not in Document.model_fields
+
+    def test_metadata_must_be_strings(self):
         with pytest.raises(ValidationError):
-            Document(
-                format="x",
-                filename="a",
-                blocks=[{"type": "mystery_block"}],
-            )
+            Document(format="pdf", filename="a.pdf", metadata={"title": object()})
 
     def test_warnings(self):
-        doc = Document(format="pdf", filename="a.pdf")
-        doc.warnings.append(
-            ConversionWarning(code="chart", message="Chart skipped", severity="warning")
+        doc = Document(
+            format="docx",
+            filename="notes.docx",
+            warnings=[ConversionWarning(code="ocr_used", message="OCR ran")],
         )
-        assert doc.warnings[0].code == "chart"
+        assert doc.warnings[0].code == "ocr_used"
+        assert doc.warnings[0].severity == "warning"
 
-    def test_stats_defaults(self):
-        doc = Document(format="pdf", filename="a.pdf")
-        assert doc.stats.pages == 0
-        assert doc.stats.tables == 0
+    def test_warning_severity_is_constrained(self):
+        with pytest.raises(ValidationError):
+            ConversionWarning(code="x", message="y", severity="catastrophic")
 
-    def test_table_model(self):
-        table = TableBlock(
-            rows=[
-                TableRow(cells=[TableCell(content=[TextRun(text="A")]), TableCell(content=[TextRun(text="1")], align="right")]),
-            ],
-            has_header=True,
-        )
-        assert table.rows[0].cells[1].align == "right"
+
+class TestDocumentStats:
+    def test_defaults_are_zero(self):
+        stats = DocumentStats()
+        assert stats.pages == 0
+        assert stats.images == 0
+        assert stats.ocr_pages == 0
+
+    def test_counts_round_trip(self):
+        stats = DocumentStats(pages=3, images=2, tables=1)
+        assert stats.model_dump()["images"] == 2
+
+
+class TestMetadata:
+    def test_drops_empty_values(self):
+        assert normalize_metadata({"title": "  ", "author": "Ada"}) == {"author": "Ada"}
+
+    def test_stringifies_values(self):
+        assert normalize_metadata({"pages": 12})["pages"] == "12"

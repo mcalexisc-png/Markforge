@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from fixtures.make_fixtures import make_docx, make_pdf, make_pptx, make_xlsx
 
 
@@ -36,10 +37,50 @@ def upload_from(make_fn, tmp_path: Path, name: str) -> Path:
 class TestUploadValidation:
     def test_unsupported_extension(self, client):
         response = client.post(
-            "/api/files/upload", files=[("files", ("evil.txt", b"hello", "text/plain"))]
+            "/api/files/upload",
+            files=[("files", ("evil.exe", b"MZ\x90\x00", "application/octet-stream"))],
         )
         assert response.status_code == 400
         assert "Unsupported" in response.json()["detail"]
+
+    @pytest.mark.parametrize("name", ["clip.mp3", "clip.wav", "clip.m4a"])
+    def test_audio_is_rejected(self, client, name):
+        """Audio must never be accepted: MarkItDown transcribes it by uploading
+        the audio to Google's Web Speech API, which would break local-only."""
+        response = client.post(
+            "/api/files/upload", files=[("files", (name, b"ID3\x04\x00", "audio/mpeg"))]
+        )
+        assert response.status_code == 400
+        assert "Unsupported" in response.json()["detail"]
+
+    @pytest.mark.parametrize("name", ["photo.png", "photo.jpg", "archive.zip"])
+    def test_images_and_archives_are_rejected(self, client, name):
+        """Images need a remote caption model to be useful, and archives would
+        recursively reach converters the allowlist otherwise excludes."""
+        response = client.post(
+            "/api/files/upload",
+            files=[("files", (name, b"PK\x03\x04", "application/octet-stream"))],
+        )
+        assert response.status_code == 400
+        assert "Unsupported" in response.json()["detail"]
+
+    def test_binary_renamed_as_text_is_rejected(self, client):
+        """Text formats have no magic bytes, so the binary heuristic is the
+        only thing standing between a renamed binary and the converter."""
+        payload = b"\x00\x01\x02\x03" * 64
+        response = client.post(
+            "/api/files/upload", files=[("files", ("notes.txt", payload, "text/plain"))]
+        )
+        assert response.status_code == 400
+        assert "readable" in response.json()["detail"]
+
+    def test_invalid_json_is_rejected(self, client):
+        response = client.post(
+            "/api/files/upload",
+            files=[("files", ("data.json", b"{not valid json", "application/json"))],
+        )
+        assert response.status_code == 400
+        assert "JSON" in response.json()["detail"]
 
     def test_mime_mismatch(self, client, tmp_path):
         source = tmp_path / "fake.pdf"
@@ -433,3 +474,235 @@ class TestZipEndpoint:
         assert client.put(f"/api/jobs/{job_id}/markdown", json={"content": edited}).status_code == 204
         assert client.get(f"/api/jobs/{job_id}/zip").status_code == 200
         assert zip_path.stat().st_mtime_ns > first_mtime, "edited results must refresh the archive"
+
+
+class TestAssetServing:
+    """Extracted figures must be reachable by the preview and nothing else."""
+
+    def _figure_job(self, client, tmp_path: Path):
+        from tests.unit.test_markitdown import make_figure_pdf
+
+        source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
+        file_id = upload(client, "figures.pdf", source)["id"]
+        job = run_job(client, [file_id])
+        assert job["status"] == "completed", job
+        return job, job["items"][0]
+
+    def test_extracted_figure_is_served(self, client, tmp_path):
+        job, item = self._figure_job(client, tmp_path)
+        assert item["stats"]["images"] == 2
+
+        preview = client.get(
+            f"/api/jobs/{job['id']}/preview", params={"file_id": item["file_id"]}
+        )
+        assert preview.status_code == 200
+        content = preview.json()["content"]
+        # The stored Markdown keeps portable relative paths.
+        assert "](assets/image-001.png)" in content
+
+        response = client.get(
+            f"/api/jobs/{job['id']}/assets/{item['file_id']}/image-001.png"
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content.startswith(b"\x89PNG")
+
+    @pytest.mark.parametrize(
+        "name",
+        ["../document.md", "..%2Fdocument.md", "....//document.md"],
+    )
+    def test_traversal_is_refused(self, client, tmp_path, name):
+        job, item = self._figure_job(client, tmp_path)
+        response = client.get(
+            f"/api/jobs/{job['id']}/assets/{item['file_id']}/{name}"
+        )
+        assert response.status_code == 404
+        assert b"# " not in response.content
+
+    def test_non_image_is_refused(self, client, tmp_path):
+        """The asset route serves figures, not arbitrary files from the job dir."""
+        job, item = self._figure_job(client, tmp_path)
+        response = client.get(
+            f"/api/jobs/{job['id']}/assets/{item['file_id']}/document.md"
+        )
+        assert response.status_code == 404
+
+    def test_missing_asset_is_404(self, client, tmp_path):
+        job, item = self._figure_job(client, tmp_path)
+        response = client.get(
+            f"/api/jobs/{job['id']}/assets/{item['file_id']}/image-999.png"
+        )
+        assert response.status_code == 404
+
+    def test_zip_contains_the_assets(self, client, tmp_path):
+        """A downloaded ZIP must stay usable offline, images included."""
+        import io
+        import zipfile
+
+        job, _ = self._figure_job(client, tmp_path)
+        response = client.get(f"/api/jobs/{job['id']}/zip")
+        assert response.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = archive.namelist()
+        assert any(n.endswith("document.md") for n in names)
+        assert any("/assets/image-001.png" in n for n in names)
+
+
+class TestSearch:
+    def _converted(self, client, tmp_path: Path, name: str, text: str):
+        import pymupdf
+
+        source = tmp_path / name
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), text)
+        doc.save(source)
+        doc.close()
+        file_id = upload(client, name, source)["id"]
+        job = run_job(client, [file_id])
+        assert job["status"] == "completed", job
+        return job
+
+    def test_finds_a_converted_document(self, client, tmp_path):
+        job = self._converted(
+            client, tmp_path, "physics.pdf", "The Nyquist sampling theorem"
+        )
+        response = client.get("/api/search", params={"q": "Nyquist"})
+        assert response.status_code == 200
+        hits = response.json()
+        assert len(hits) == 1
+        assert hits[0]["job_id"] == job["id"]
+        assert "Nyquist" in hits[0]["snippet"]
+
+    def test_prefix_matching(self, client, tmp_path):
+        self._converted(client, tmp_path, "bio.pdf", "Photosynthesis in plants")
+        hits = client.get("/api/search", params={"q": "photosyn"}).json()
+        assert len(hits) == 1
+
+    def test_blank_query_returns_nothing(self, client, tmp_path):
+        self._converted(client, tmp_path, "any.pdf", "Some content here")
+        assert client.get("/api/search", params={"q": "   "}).json() == []
+        assert client.get("/api/search").json() == []
+
+    @pytest.mark.parametrize("q", ['a " quote', "AND", "NEAR(", "*", ")))"])
+    def test_hostile_queries_do_not_error(self, client, tmp_path, q):
+        """FTS5 syntax typed by a user must be literal text, never an error."""
+        self._converted(client, tmp_path, "safe.pdf", "Ordinary content")
+        response = client.get("/api/search", params={"q": q})
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+    def test_edits_are_reindexed(self, client, tmp_path):
+        job = self._converted(client, tmp_path, "draft.pdf", "Original wording here")
+        file_id = job["items"][0]["file_id"]
+        client.put(
+            f"/api/jobs/{job['id']}/markdown",
+            json={"content": "Completely different terminology", "file_id": file_id},
+        )
+        assert client.get("/api/search", params={"q": "terminology"}).json()
+        assert client.get("/api/search", params={"q": "Original"}).json() == []
+
+    def test_reset_restores_the_index(self, client, tmp_path):
+        job = self._converted(client, tmp_path, "draft.pdf", "Original wording here")
+        file_id = job["items"][0]["file_id"]
+        client.put(
+            f"/api/jobs/{job['id']}/markdown",
+            json={"content": "Temporary replacement", "file_id": file_id},
+        )
+        client.post(f"/api/jobs/{job['id']}/reset", params={"file_id": file_id})
+        assert client.get("/api/search", params={"q": "Original"}).json()
+        assert client.get("/api/search", params={"q": "Temporary"}).json() == []
+
+    def test_deleting_a_job_drops_its_rows(self, client, tmp_path):
+        """A hit that cannot be opened is worse than no hit."""
+        job = self._converted(client, tmp_path, "gone.pdf", "Ephemeral content")
+        assert client.get("/api/search", params={"q": "Ephemeral"}).json()
+        client.delete(f"/api/jobs/{job['id']}")
+        assert client.get("/api/search", params={"q": "Ephemeral"}).json() == []
+
+    def test_backfill_indexes_preexisting_results(self, client, tmp_path):
+        from sqlalchemy import text as sql_text
+
+        from app.core.db import engine
+        from app.services import search as search_service
+
+        self._converted(client, tmp_path, "legacy.pdf", "Archaeological findings")
+        # Simulate an install that converted before search existed.
+        with engine.begin() as connection:
+            connection.execute(sql_text("DELETE FROM markdown_fts"))
+        assert client.get("/api/search", params={"q": "Archaeological"}).json() == []
+
+        assert search_service.backfill_missing() >= 1
+        assert client.get("/api/search", params={"q": "Archaeological"}).json()
+
+
+class TestQueueOverflow:
+    def test_rejected_job_leaves_no_orphan_row(self, client, tmp_path, monkeypatch):
+        """A refused dispatch must not strand a permanently `queued` job.
+
+        The row is committed before dispatch, and retention only reaps jobs in
+        a terminal state -- so an orphan would keep its output directory for
+        the lifetime of the install.
+        """
+        import threading
+
+        from app.services import jobs as jobs_module
+
+        source = upload_from(make_pdf, tmp_path, "queued.pdf")
+        file_id = upload(client, "queued.pdf", source)["id"]
+
+        # No queue capacity at all.
+        monkeypatch.setattr(jobs_module, "_queue_slots", threading.BoundedSemaphore(1))
+        assert jobs_module._queue_slots.acquire(blocking=False)
+
+        response = client.post("/api/jobs", json={"file_ids": [file_id], "settings": {}})
+        assert response.status_code == 409
+        assert "wait" in response.json()["detail"].lower()
+
+        jobs_module._queue_slots.release()
+
+        history = client.get("/api/jobs/history").json()
+        assert all(item["status"] != "queued" for item in history)
+
+    def test_capacity_error_when_too_many_threads_are_stuck(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Timed-out conversions leak threads; past a cap, fail fast."""
+        from app.services import jobs as jobs_module
+
+        source = upload_from(make_pdf, tmp_path, "stuck.pdf")
+        file_id = upload(client, "stuck.pdf", source)["id"]
+
+        monkeypatch.setattr(jobs_module, "_abandoned_conversions", 99)
+        response = client.post("/api/jobs", json={"file_ids": [file_id], "settings": {}})
+        assert response.status_code == 409
+        assert "timed out" in response.json()["detail"].lower()
+
+
+class TestErrorShape:
+    def test_unhandled_errors_return_json_detail(self, monkeypatch):
+        """Every error the API returns carries a `detail` key.
+
+        The global handler used to return a plain-text body, so the frontend's
+        error parser found nothing and showed a generic message.
+        """
+        from app.services import jobs as job_service
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(job_service, "list_jobs", boom)
+
+        # The default TestClient re-raises server exceptions; we want to see
+        # the response the browser would actually get.
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app, raise_server_exceptions=False) as raw:
+            response = raw.get("/api/jobs/history")
+        assert response.status_code == 500
+        assert response.headers["content-type"].startswith("application/json")
+        assert "detail" in response.json()
+        # The internal message must not leak to the client.
+        assert "kaboom" not in response.text
