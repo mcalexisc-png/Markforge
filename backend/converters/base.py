@@ -66,6 +66,11 @@ class ConversionContext:
         self.ocr_texts: dict[int, str] = {}
         self.markdown_output: str | None = None
         self._seen_assets: dict[str, str] = {}
+        # How many distinct images were recurring page-template chrome
+        # (backgrounds/logos on most pages) and were kept on their first page
+        # only. Set by extract_pdf_images; read back by convert_with_markitdown
+        # to report it as a warning.
+        self.recurring_backgrounds_suppressed = 0
 
     def progress(self, phase: str, current: int = 0, total: int = 0, message: str = "") -> None:
         if self.progress_cb:

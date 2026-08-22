@@ -42,6 +42,13 @@ _MEDIA_EXTENSIONS = {
 }
 
 
+# An image referenced on more than this fraction of the document's pages
+# reads as page-template chrome (a slide background, letterhead or repeating
+# logo) rather than a distinct figure -- save_image() already dedups it to
+# one file on disk, so this only decides how many *references* to keep.
+_BACKGROUND_PAGE_RATIO = 0.5
+
+
 def is_decorative(width: int, height: int, size_bytes: int) -> bool:
     """True when an image is too small, thin or trivial to be a real figure."""
     if width <= 0 or height <= 0:
@@ -56,11 +63,55 @@ def is_decorative(width: int, height: int, size_bytes: int) -> bool:
     return max(width, height) / min(width, height) > MAX_ASPECT_RATIO
 
 
+def _suppress_recurring_backgrounds(
+    by_page: dict[int, list[tuple[str, str]]], total_pages: int
+) -> tuple[dict[int, list[tuple[str, str]]], int]:
+    """Keep a page-template image on its first page only.
+
+    ``by_page`` already has each unique image written to disk once (see
+    ``save_image``'s content-hash dedup) -- an image's relative path is
+    therefore already a stable identity for "the same picture". What this
+    removes is redundant *references* to a picture that shows up on most of
+    the document's pages, which is what a slide background or repeated logo
+    looks like. Returns the filtered dict and how many distinct images were
+    suppressed, so the caller can report it.
+    """
+    if total_pages <= 0:
+        return by_page, 0
+
+    counts: dict[str, int] = {}
+    for items in by_page.values():
+        for rel, _alt in items:
+            counts[rel] = counts.get(rel, 0) + 1
+
+    threshold = total_pages * _BACKGROUND_PAGE_RATIO
+    recurring = {rel for rel, count in counts.items() if count > threshold}
+    if not recurring:
+        return by_page, 0
+
+    filtered: dict[int, list[tuple[str, str]]] = {}
+    seen: set[str] = set()
+    for page_number in sorted(by_page):
+        kept: list[tuple[str, str]] = []
+        for rel, alt in by_page[page_number]:
+            if rel in recurring:
+                if rel in seen:
+                    continue
+                seen.add(rel)
+            kept.append((rel, alt))
+        if kept:
+            filtered[page_number] = kept
+    return filtered, len(recurring)
+
+
 def extract_pdf_images(source: Path, context) -> dict[int, list[tuple[str, str]]]:
     """Extract page images from a PDF.
 
     Returns ``{page_number: [(relative_path, alt_text), ...]}`` using 1-based
     page numbers so the result lines up with the ``<!-- Page N -->`` markers.
+    A recurring page-template image (see ``_suppress_recurring_backgrounds``)
+    is kept on its first page only; ``context.recurring_backgrounds_suppressed``
+    is set to how many distinct images that affected.
     """
     try:
         import pymupdf
@@ -72,6 +123,7 @@ def extract_pdf_images(source: Path, context) -> dict[int, list[tuple[str, str]]
     except Exception:
         return {}
 
+    total_pages = doc.page_count
     by_page: dict[int, list[tuple[str, str]]] = {}
     try:
         for page_index, page in enumerate(doc, start=1):
@@ -100,6 +152,8 @@ def extract_pdf_images(source: Path, context) -> dict[int, list[tuple[str, str]]
                     by_page.setdefault(page_index, []).append((rel, alt))
     finally:
         doc.close()
+    by_page, suppressed = _suppress_recurring_backgrounds(by_page, total_pages)
+    context.recurring_backgrounds_suppressed = suppressed
     return by_page
 
 

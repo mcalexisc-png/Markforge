@@ -31,6 +31,7 @@ from converters.images import (
 )
 from converters.markitdown_pdf import ColumnAwarePdfConverter
 from converters.markitdown_pptx import HeadingPptxConverter
+from converters.markitdown_xlsx import MergeAwareXlsConverter, MergeAwareXlsxConverter
 from converters.pdf_helpers import dedupe_duplicate_pages, textless_pages
 from document_model.document import ConversionWarning, Document, DocumentStats
 from document_model.metadata import normalize_metadata
@@ -216,8 +217,6 @@ def build_local_engine(context: ConversionContext | None = None):
         PdfConverter,
         PlainTextConverter,
         PptxConverter,
-        XlsConverter,
-        XlsxConverter,
     )
 
     md = MarkItDown(enable_builtins=False)
@@ -229,8 +228,6 @@ def build_local_engine(context: ConversionContext | None = None):
     # Format-specific converters.
     for converter in (
         DocxConverter(),
-        XlsxConverter(),
-        XlsConverter(),
         PptxConverter(),
         IpynbConverter(),
         PdfConverter(),
@@ -240,9 +237,11 @@ def build_local_engine(context: ConversionContext | None = None):
     ):
         md.register_converter(converter)
 
-    # Ours last so they outrank the stock PDF/PPTX converters.
+    # Ours last so they outrank the stock PDF/PPTX/XLSX/XLS converters.
     md.register_converter(ColumnAwarePdfConverter())
     md.register_converter(HeadingPptxConverter(context=context))
+    md.register_converter(MergeAwareXlsxConverter())
+    md.register_converter(MergeAwareXlsConverter())
     return md
 
 
@@ -420,6 +419,17 @@ def convert_with_markitdown(context: ConversionContext) -> Document:
             ConversionWarning(
                 code="images_extracted",
                 message=f"{doc.stats.images} figure(s) saved alongside the Markdown.",
+                severity="info",
+            )
+        )
+    if context.recurring_backgrounds_suppressed:
+        doc.warnings.append(
+            ConversionWarning(
+                code="recurring_backgrounds_suppressed",
+                message=(
+                    f"{context.recurring_backgrounds_suppressed} recurring "
+                    "background image(s) shown once instead of on every page."
+                ),
                 severity="info",
             )
         )

@@ -10,6 +10,7 @@ body size to ``## `` headings, mirroring the PDF converter.
 from __future__ import annotations
 
 import contextlib
+import re
 import statistics
 
 import pptx
@@ -17,9 +18,32 @@ from markitdown._base_converter import DocumentConverterResult
 from markitdown.converters import PptxConverter
 
 from converters.images import is_decorative
+from converters.markitdown_pdf import _normalize_bullet_prefix
 
 _BODY_RATIO = 1.2
 _MAX_TITLE_CHARS = 120
+
+# PowerPoint/Google Slides create the notes placeholder on every slide
+# regardless of whether the author typed anything into it, so
+# slide.has_notes_slide is True almost universally -- it says nothing about
+# whether there is real content to show.
+_PLACEHOLDER_ALT_RE = re.compile(
+    r"^(?:.*\.(?:png|jpe?g|gif|bmp|webp|svg)|picture\s*\d*|image\s*\d*|"
+    r"content placeholder\s*\d*)$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_placeholder_alt(text: str) -> bool:
+    """True when ``text`` is an auto-generated name, not a real description.
+
+    Google Slides is known to write the pasted image's own filename (e.g.
+    "preencoded.png") into the shape's description when the author never set
+    real alt text -- that's a genuine value in the file, not a bug in how we
+    read it, but showing a raw filename as alt text looks bad and isn't a
+    useful description, so it's treated as if no alt text were set.
+    """
+    return bool(_PLACEHOLDER_ALT_RE.match(text.strip()))
 
 
 def _shape_max_size(shape) -> float:
@@ -107,6 +131,8 @@ class HeadingPptxConverter(PptxConverter):
                     with contextlib.suppress(Exception):
                         alt_text = shape._element._nvXxPr.cNvPr.attrib.get("descr", "")
                     alt_text = _re_sub_whitespace(alt_text)
+                    if _looks_like_placeholder_alt(alt_text):
+                        alt_text = ""
                     rendered = self._picture_markdown(shape, alt_text)
                     if rendered is not None:
                         md_content += rendered
@@ -143,7 +169,17 @@ class HeadingPptxConverter(PptxConverter):
                     ):
                         md_content += "## " + text + "\n"
                     else:
-                        md_content += shape.text + "\n"
+                        # A slide's body text is sometimes typed with a
+                        # literal bullet glyph rather than PowerPoint's own
+                        # bullet-list formatting (common in decks pasted in
+                        # from elsewhere) -- normalize each line the same way
+                        # the PDF converter does, so it renders as a real
+                        # Markdown list instead of a stray character.
+                        normalized = "\n".join(
+                            _normalize_bullet_prefix(line)
+                            for line in shape.text.split("\n")
+                        )
+                        md_content += normalized + "\n"
                     return
 
                 # Group shapes
@@ -171,10 +207,13 @@ class HeadingPptxConverter(PptxConverter):
             md_content = md_content.strip()
 
             if slide.has_notes_slide:
-                md_content += "\n\n### Notes:\n"
                 notes_frame = slide.notes_slide.notes_text_frame
-                if notes_frame is not None:
-                    md_content += notes_frame.text
+                notes_text = notes_frame.text.strip() if notes_frame is not None else ""
+                if notes_text:
+                    notes_text = "\n".join(
+                        _normalize_bullet_prefix(line) for line in notes_text.split("\n")
+                    )
+                    md_content += f"\n\n### Notes:\n{notes_text}"
                 md_content = md_content.strip()
 
         return DocumentConverterResult(markdown=md_content.strip())

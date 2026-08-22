@@ -102,7 +102,137 @@ class TestMarkitdownEngine:
         out = context.markdown_output
         assert out
         assert "![" not in out
-        assert "[Image: image.png]" in out
+        # python-pptx auto-names an added picture shape "image.png" when no
+        # real name/description was set -- that filename-shaped default is
+        # exactly what _looks_like_placeholder_alt now filters out, so the
+        # generic "Picture" fallback is used instead of leaking the filename.
+        assert "[Image: Picture]" in out
+
+    def test_pptx_blank_notes_are_omitted(self, tmp_path: Path):
+        """PowerPoint creates the notes placeholder on every slide regardless
+        of whether the author typed anything -- has_notes_slide alone must not
+        be enough to emit a "### Notes:" heading with nothing under it."""
+        from pptx import Presentation
+
+        source = tmp_path / "notes.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Slide with blank notes"
+        # Accessing notes_slide creates it (has_notes_slide becomes True) even
+        # though nothing is ever written into it.
+        slide.notes_slide.notes_text_frame.text = "   "
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        assert "### Notes:" not in context.markdown_output
+
+    def test_pptx_real_notes_are_kept(self, tmp_path: Path):
+        from pptx import Presentation
+
+        source = tmp_path / "notes.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Slide with real notes"
+        slide.notes_slide.notes_text_frame.text = "Remember to mention the deadline."
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "### Notes:" in md
+        assert "Remember to mention the deadline." in md
+
+    def test_pptx_literal_bullet_glyphs_become_list_items(self, tmp_path: Path):
+        """A slide body sometimes has a literal "•" typed into the text
+        instead of PowerPoint's own bullet-list paragraph formatting (common
+        in decks pasted in from elsewhere) -- must normalize the same way a
+        PDF's bullets do, not leak the raw glyph."""
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        source = tmp_path / "bullets.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(3))
+        tf = box.text_frame
+        tf.text = "• first point"
+        tf.add_paragraph().text = "• second point"
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "- first point" in md
+        assert "- second point" in md
+        assert not any(line and line[0] in "●•" for line in md.splitlines())
+
+    def test_pptx_notes_bullets_are_also_normalized(self, tmp_path: Path):
+        """Same normalization applies to presenter notes text, not only the
+        visible slide body -- confirmed against a real deck where this
+        content lived in the notes, not on any slide."""
+        from pptx import Presentation
+
+        source = tmp_path / "notes-bullets.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "Methodology"
+        slide.notes_slide.notes_text_frame.text = (
+            "Summary of choices:\n• point one\n• point two"
+        )
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "- point one" in md
+        assert "- point two" in md
+        assert not any(line and line[0] in "●•" for line in md.splitlines())
+
+    def test_pptx_placeholder_alt_text_is_not_leaked(self, tmp_path: Path):
+        """A filename Google Slides wrote into a shape's description (e.g.
+        because the author never set real alt text) must not be shown
+        verbatim -- it reads as a bug, not a description, to a reader."""
+        from io import BytesIO
+
+        from PIL import Image
+        from pptx import Presentation
+
+        source = tmp_path / "alt.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        buffer = BytesIO()
+        Image.new("RGB", (400, 300), (40, 120, 200)).save(buffer, format="PNG")
+        buffer.seek(0)
+        picture = slide.shapes.add_picture(buffer, 0, 0)
+        picture._element._nvXxPr.cNvPr.attrib["descr"] = "preencoded.png"
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "preencoded" not in md
+        assert "Slide image" in md
+
+    def test_pptx_real_alt_text_is_kept(self, tmp_path: Path):
+        from io import BytesIO
+
+        from PIL import Image
+        from pptx import Presentation
+
+        source = tmp_path / "alt.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        buffer = BytesIO()
+        Image.new("RGB", (400, 300), (40, 120, 200)).save(buffer, format="PNG")
+        buffer.seek(0)
+        picture = slide.shapes.add_picture(buffer, 0, 0)
+        picture._element._nvXxPr.cNvPr.attrib["descr"] = "Diagram of the water cycle"
+        prs.save(source)
+
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        assert "Diagram of the water cycle" in context.markdown_output
 
     def test_stats_count_pages_slides_sheets(self, tmp_path: Path):
         pdf = make_deck_pdf(tmp_path / "deck.pdf")
@@ -262,6 +392,241 @@ class TestColumnAwarePdf:
 
         assert seen_flags, "the page.get_text('dict', ...) call was not exercised"
         assert all(not (f & pymupdf.TEXT_PRESERVE_LIGATURES) for f in seen_flags)
+
+    def test_wrapped_sentence_reflows_into_one_line(self, tmp_path: Path):
+        """A sentence PDF-wrapped across several same-size lines becomes one."""
+        import pymupdf
+
+        source = tmp_path / "wrapped.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Section heading", fontsize=20)
+        y = 120
+        for chunk in (
+            "the quick brown fox",
+            "jumps over the lazy",
+            "dog while the sun",
+            "was setting slowly.",
+        ):
+            page.insert_text((72, y), chunk, fontsize=12)
+            y += 20
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert (
+            "the quick brown fox jumps over the lazy dog while the sun "
+            "was setting slowly."
+        ) in md
+        # It must have become exactly one line, not four.
+        assert "the quick brown fox\n" not in md
+
+    def test_capitalized_label_does_not_merge_into_paragraph(self, tmp_path: Path):
+        """A new capitalized line must not glue onto unpunctuated prose above it.
+
+        PDFs that flatten a table into loose lines (a row label like "Meaning"
+        followed by its cell text) must not have the label silently absorbed
+        into the previous line just because that line lacks a period.
+        """
+        import pymupdf
+
+        source = tmp_path / "label.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Overview", fontsize=20)
+        page.insert_text(
+            (72, 120), "some introductory text without a period", fontsize=12
+        )
+        page.insert_text((72, 140), "Meaning", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        lines = context.markdown_output.splitlines()
+        assert "some introductory text without a period" in lines
+        assert "Meaning" in lines
+
+    def test_bullet_does_not_merge_into_preceding_paragraph(self, tmp_path: Path):
+        """A standalone marker line ("-") followed by content must start a new
+        list item, never get glued onto unpunctuated prose above it.
+
+        Uses a plain ASCII "-" rather than a symbol glyph like "●": PyMuPDF's
+        built-in base14 fonts don't carry symbol glyphs and silently
+        substitute a different character on insertion (a synthetic-PDF-fixture
+        limitation, not a property of real embedded fonts -- verified directly
+        against a real PDF that "●" round-trips correctly in production).
+        """
+        import pymupdf
+
+        source = tmp_path / "bullet.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Overview", fontsize=20)
+        page.insert_text(
+            (72, 120), "introductory text with no terminal punctuation", fontsize=12
+        )
+        page.insert_text((72, 140), "-", fontsize=12)
+        page.insert_text((72, 160), "first bullet point", fontsize=12)
+        page.insert_text((72, 180), "-", fontsize=12)
+        page.insert_text((72, 200), "second bullet point", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "introductory text with no terminal punctuation" in md
+        assert "- first bullet point" in md
+        assert "- second bullet point" in md
+        assert "punctuation - first" not in md
+
+    def test_bullet_glyphs_become_markdown_list_items(self, tmp_path: Path):
+        """Wiring check: `_extract_page` actually calls the normalizer, for
+        both the marker-merge branch and the inline plain-content branch.
+        Uses portable ASCII markers only -- see the note on the previous test
+        for why symbol glyphs aren't reliable in a synthetic test PDF; full
+        glyph-set coverage is unit-tested directly against
+        `_normalize_bullet_prefix` in TestNormalizeBulletPrefix below.
+        """
+        import pymupdf
+
+        source = tmp_path / "list.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Checklist", fontsize=20)
+        # Inline marker already on the same line as its text, as it arrives
+        # for the unambiguous glyphs (●, ✔) in a real PDF -- a dash needs the
+        # trailing space (see TestNormalizeBulletPrefix) to stay distinct
+        # from a hyphenated word, so it's included here with one.
+        page.insert_text((72, 120), "- inline item", fontsize=12)
+        # A standalone marker line followed by a separate text line -- the
+        # marker-merge path used when a PDF renders the icon as its own run.
+        page.insert_text((72, 140), "-", fontsize=12)
+        page.insert_text((72, 160), "standalone marker item", fontsize=12)
+        page.insert_text((72, 180), "1. numbered item", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "- inline item" in md
+        assert "- standalone marker item" in md
+        assert "1. numbered item" in md
+
+    def test_repeated_standalone_markers_collapse_to_one(self, tmp_path: Path):
+        """Several identical standalone marker lines in a row (observed in a
+        real document: four consecutive "-" lines used as a divider before a
+        section label) are one decorative divider, not four list items --
+        must not leave the extras stuck mid-line as literal characters.
+        """
+        import pymupdf
+
+        source = tmp_path / "divider.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Reference", fontsize=20)
+        for y in (120, 140, 160, 180):
+            page.insert_text((72, y), "-", fontsize=12)
+        page.insert_text((72, 200), "Section label", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        md = context.markdown_output
+        assert "- Section label" in md
+        assert "- - " not in md
+        assert md.count("Section label") == 1
+
+
+class TestNormalizeBulletPrefix:
+    """Direct unit tests for the glyph-normalization helper.
+
+    Kept independent of PDF rendering: PyMuPDF's built-in base14 fonts don't
+    carry every symbol glyph used here (confirmed empirically -- inserting
+    "●" via the default font round-trips as a different character), which is
+    a limitation of synthesizing a *test* PDF, not of extracting from a real
+    one. Testing the pure function directly is both more reliable and a more
+    honest match for what's actually being verified.
+    """
+
+    def test_bullet_glyphs(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        for glyph in "●•◦▪‣":
+            assert _normalize_bullet_prefix(f"{glyph}item text") == "- item text"
+            assert _normalize_bullet_prefix(f"{glyph} item text") == "- item text"
+
+    def test_check_glyphs(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        for glyph in "✔✓☑☒":
+            assert (
+                _normalize_bullet_prefix(f"{glyph}done") == "- ✔ done"
+            )
+
+    def test_numbered_marker(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert _normalize_bullet_prefix("1. first item") == "1. first item"
+        assert _normalize_bullet_prefix("2) second item") == "2. second item"
+
+    def test_dash_requires_trailing_space(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert _normalize_bullet_prefix("- dash item") == "- dash item"
+        # No space after the dash -- likely a hyphenated word, not a bullet.
+        assert _normalize_bullet_prefix("-verified") == "-verified"
+
+    def test_decimal_number_is_untouched(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert (
+            _normalize_bullet_prefix("3.5 million students")
+            == "3.5 million students"
+        )
+
+    def test_negative_number_is_untouched(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert _normalize_bullet_prefix("-5 degrees") == "-5 degrees"
+
+    def test_plain_text_is_untouched(self):
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert _normalize_bullet_prefix("ordinary sentence.") == "ordinary sentence."
+
+    def test_individually_bold_wrapped_glyph_is_still_recognized(self):
+        """`_wrap_bold` can wrap just the bullet span (not the whole line)
+        when only the glyph was bold in the source PDF, producing "**●**
+        text" rather than "●text". Confirmed in real converted output."""
+        from converters.markitdown_pdf import _normalize_bullet_prefix
+
+        assert (
+            _normalize_bullet_prefix("**●** Log in to your account")
+            == "- Log in to your account"
+        )
+        assert _normalize_bullet_prefix("**✔** done") == "- ✔ done"
+        assert _normalize_bullet_prefix("**1.** first item") == "1. first item"
+
+    def test_decimal_number_is_not_mistaken_for_a_list_marker(self, tmp_path: Path):
+        import pymupdf
+
+        source = tmp_path / "decimal.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Report", fontsize=20)
+        page.insert_text((72, 120), "3.5 million students were affected.", fontsize=12)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path, ocr_mode="never")
+        convert_with_markitdown(context)
+        assert "3.5 million students were affected." in context.markdown_output
 
     def test_large_font_promoted_to_heading(self, tmp_path: Path):
         source = make_pdf(tmp_path / "headings.pdf", pages=2)
@@ -613,7 +978,59 @@ class TestImageExtraction:
         convert_with_markitdown(context)
         assets = list((context.output_dir / "assets").glob("*"))
         assert len(assets) == 1
-        assert context.markdown_output.count("](assets/") == 4
+
+    def test_background_on_every_page_is_referenced_once(self, tmp_path: Path):
+        """A logo on every page is page-template chrome, not four figures.
+
+        save_image() already writes it to disk once (test_repeated_image_is_
+        saved_once). This is the separate step: an image on all 4 of 4 pages
+        (100% > the 50% threshold) should be *referenced* once too, kept on
+        its first page, not repeated in the Markdown on every page.
+        """
+        import pymupdf
+
+        logo = _png(300, 200, (90, 90, 200))
+        source = tmp_path / "logo.pdf"
+        doc = pymupdf.open()
+        for number in range(1, 5):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Section {number} body text")
+            page.insert_image(pymupdf.Rect(72, 100, 272, 233), stream=logo)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path)
+        result = convert_with_markitdown(context)
+        assert context.markdown_output.count("](assets/") == 1
+        assert "<!-- Page 1 -->" in context.markdown_output
+        page_1_segment = context.markdown_output.split("<!-- Page 2 -->")[0]
+        assert "](assets/" in page_1_segment
+        assert any(
+            w.code == "recurring_backgrounds_suppressed" for w in result.warnings
+        )
+
+    def test_image_on_a_minority_of_pages_is_not_suppressed(self, tmp_path: Path):
+        """A figure that only recurs a couple of times must survive intact."""
+        import pymupdf
+
+        chart = _png(400, 300, (40, 120, 200))
+        source = tmp_path / "chart.pdf"
+        doc = pymupdf.open()
+        for number in range(1, 7):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Section {number} body text")
+            # Appears on only 2 of 6 pages (33%), well under the threshold.
+            if number in (1, 4):
+                page.insert_image(pymupdf.Rect(72, 100, 372, 250), stream=chart)
+        doc.save(source)
+        doc.close()
+
+        context = make_context(source, tmp_path)
+        result = convert_with_markitdown(context)
+        assert context.markdown_output.count("](assets/") == 2
+        assert not any(
+            w.code == "recurring_backgrounds_suppressed" for w in result.warnings
+        )
 
     def test_extraction_can_be_turned_off(self, tmp_path: Path):
         source = make_figure_pdf(tmp_path / "figures.pdf", pages=2)
@@ -700,3 +1117,142 @@ class TestImageExtraction:
         assert "[Image:" not in out
         # The figure belongs to slide 2, not slide 1.
         assert out.index("<!-- Slide number: 2 -->") < out.index("](assets/")
+
+
+class TestMergeAwareXlsx:
+    """The stock pandas-based xlsx converter has three confirmed defects:
+    an empty cell renders as the literal string "NaN", an empty sheet
+    produces a malformed one-cell table, and a merged cell's non-top-left
+    columns silently vanish from the table's column count. These test the
+    replacement converter directly (bypassing pandas) against real
+    openpyxl-written and -read files.
+    """
+
+    def _convert(self, tmp_path: Path, workbook) -> str:
+        source = tmp_path / "book.xlsx"
+        workbook.save(source)
+        context = make_context(source, tmp_path)
+        convert_with_markitdown(context)
+        return context.markdown_output
+
+    def test_empty_cell_is_blank_not_nan(self, tmp_path: Path):
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Grades"
+        ws.append(["Student", "Score", "Notes"])
+        ws.append(["Ada", 99, None])
+        ws.append(["Grace", 100, "top"])
+
+        md = self._convert(tmp_path, wb)
+        assert "NaN" not in md
+        assert "| Ada | 99 |  |" in md
+
+    def test_empty_sheet_gets_a_clear_note_not_a_malformed_table(
+        self, tmp_path: Path
+    ):
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.active.title = "Empty"
+
+        md = self._convert(tmp_path, wb)
+        assert "_(empty sheet)_" in md
+        assert "|" not in md
+
+    def test_merged_cell_repeats_its_value_instead_of_collapsing_the_row(
+        self, tmp_path: Path
+    ):
+        """A merged A1:B1 cell's non-top-left value is genuinely gone the
+        moment the file is saved -- confirmed directly against the raw XLSX
+        XML, which stores only one <c> element for the whole merged range.
+        There is nothing left to "recover"; the defect being fixed is that
+        the stock converter rendered that row with *fewer columns* than the
+        table's header, a malformed/ragged table. The fix keeps every row's
+        column count consistent by repeating the one value that survives.
+        """
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Merged"
+        ws.append(["Q1", "Q2"])
+        ws.merge_cells("A1:B1")
+
+        md = self._convert(tmp_path, wb)
+        assert "| Q1 | Q1 |" in md
+        assert "Q2" not in md
+
+    def test_whole_number_is_not_shown_as_a_float(self, tmp_path: Path):
+        from converters.markitdown_xlsx import _format_cell_value
+
+        assert _format_cell_value(99.0) == "99"
+        assert _format_cell_value(99.5) == "99.5"
+        assert _format_cell_value(None) == ""
+        assert _format_cell_value("") == ""
+        assert _format_cell_value("Ada") == "Ada"
+
+    def test_pipe_in_cell_text_is_escaped(self, tmp_path: Path):
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["A|B", "plain"])
+
+        md = self._convert(tmp_path, wb)
+        assert "A\\|B" in md
+
+    def test_multiple_sheets_are_all_rendered(self, tmp_path: Path):
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.active.title = "First"
+        wb.active.append(["x"])
+        wb.create_sheet("Second").append(["y"])
+
+        md = self._convert(tmp_path, wb)
+        assert "## First" in md
+        assert "## Second" in md
+
+
+class TestXlrdGridBuilding:
+    """Unit tests for the .xls (legacy BIFF) reader's grid construction.
+
+    A minimal stub stands in for an xlrd Sheet rather than a real .xls file:
+    xlrd can only *read* the legacy format, there is no pure-Python writer
+    available in this project's dependencies (xlwt is not installed) or
+    reliably available in CI (no libreoffice dependency), so this tests the
+    same backfill logic MergeAwareXlsConverter._grid_from_xlrd relies on
+    directly against a controlled input.
+    """
+
+    class _FakeSheet:
+        def __init__(self, rows, merged_cells=()):
+            self._rows = rows
+            self.nrows = len(rows)
+            self.ncols = len(rows[0]) if rows else 0
+            self.merged_cells = merged_cells
+
+        def cell_value(self, r, c):
+            return self._rows[r][c]
+
+    def test_backfills_a_merged_range(self):
+        from converters.markitdown_xlsx import _grid_from_xlrd
+
+        # xlrd's merged_cells format: (row_lo, row_hi, col_lo, col_hi),
+        # 0-indexed with a half-open upper bound.
+        sheet = self._FakeSheet(
+            rows=[["Q1", ""], ["Ada", 99.0]],
+            merged_cells=[(0, 1, 0, 2)],
+        )
+        grid = _grid_from_xlrd(sheet)
+        assert grid[0] == ["Q1", "Q1"]
+        assert grid[1] == ["Ada", "99"]
+
+    def test_blank_cells_render_empty(self):
+        from converters.markitdown_xlsx import _grid_from_xlrd
+
+        sheet = self._FakeSheet(rows=[["a", ""], ["", "b"]])
+        grid = _grid_from_xlrd(sheet)
+        assert grid == [["a", ""], ["", "b"]]

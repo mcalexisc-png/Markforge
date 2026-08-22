@@ -28,6 +28,27 @@ _MAX_TITLE_CHARS = 100
 _BOLD_FLAG = 1 << 4  # PyMuPDF span flag for bold text
 _MARKER_LINE_RE = re.compile(r"^(?:[✔✓☑☒●•◦▪‣–—\-]|\d+[.)])$")
 
+# Same glyph set as _MARKER_LINE_RE, but matched as a *prefix* (glyph +
+# optional/required whitespace) rather than a whole-line match, so an inline
+# bullet like "●Pwersahang paghalik..." (PDF export often omits the space
+# between the glyph and its text) is recognized too, not just a bullet that
+# arrived on its own line.
+#
+# The bullet-icon and checkmark glyphs are unambiguous -- nobody writes "●" or
+# "✔" as ordinary punctuation -- so any amount of following whitespace (even
+# none) counts. A plain "-"/"–"/"—" and a digit followed by "." are genuinely
+# ambiguous with a hyphen, a minus sign, or a decimal ("3.5 million"), so
+# those two require at least one space after the punctuation before they are
+# treated as a list marker.
+#
+# The optional (?:\*\*)? on both sides handles a glyph that was individually
+# bold-styled in the source PDF (_wrap_bold wraps just that one span), e.g.
+# "**●** Log in..." -- observed in real converted output.
+_NUMBER_PREFIX_RE = re.compile(r"^(?:\*\*)?(\d+)[.)](?:\*\*)?\s+")
+_CHECK_PREFIX_RE = re.compile(r"^(?:\*\*)?[✔✓☑☒](?:\*\*)?\s*")
+_BULLET_GLYPH_PREFIX_RE = re.compile(r"^(?:\*\*)?[●•◦▪‣](?:\*\*)?\s*")
+_DASH_PREFIX_RE = re.compile(r"^(?:\*\*)?[\-–—](?:\*\*)?\s+")
+
 # PyMuPDF preserves typographic ligatures (ﬀ, ﬁ, ﬂ, ﬃ, ...) as single glyphs
 # by default, so "Effects" extracts as "Eﬀects" and "Office" as "Oﬃce" --
 # copy-pasted or searched text then silently fails to match the plain-ASCII
@@ -50,6 +71,26 @@ def _wrap_bold(span_text: str) -> str:
     leading = span_text[: len(span_text) - len(span_text.lstrip())]
     trailing = span_text[len(span_text.rstrip()) :]
     return leading + f"**{stripped}**" + trailing
+
+
+def _normalize_bullet_prefix(text: str) -> str:
+    """Rewrite a leading bullet/checkmark/number glyph as real Markdown list syntax.
+
+    PyMuPDF hands back whatever glyph the PDF printed for a bullet (``●``,
+    ``✔``, ...) as a literal character; a Markdown renderer just shows that
+    character, it does not render a list. Rewriting it to ``- ``, ``- ✔ `` or
+    ``N. `` is what makes it render as an actual list item. If ``text`` does
+    not start with a recognized glyph, it is returned unchanged.
+    """
+    if m := _NUMBER_PREFIX_RE.match(text):
+        return f"{m.group(1)}. {text[m.end():]}"
+    if _CHECK_PREFIX_RE.match(text):
+        return "- ✔ " + _CHECK_PREFIX_RE.sub("", text, count=1)
+    if _BULLET_GLYPH_PREFIX_RE.match(text):
+        return "- " + _BULLET_GLYPH_PREFIX_RE.sub("", text, count=1)
+    if _DASH_PREFIX_RE.match(text):
+        return "- " + _DASH_PREFIX_RE.sub("", text, count=1)
+    return text
 
 
 def _extract_page(page) -> str:
@@ -93,12 +134,18 @@ def _extract_page(page) -> str:
         )
 
     out: list[str] = []
+    # Tracks the (font size, raw text) of the most recently *appended plain or
+    # list line*, so the next line can decide whether it continues that line
+    # or starts a new one. Reset to None after a heading or a lone marker,
+    # which nothing may be glued onto or glued out of.
+    pending: tuple[float, str] | None = None
     index = 0
     while index < len(lines):
         size, text = lines[index]
         if _MARKER_LINE_RE.match(text.replace("**", "")):
             # Standalone markers (bullets, numbers, checkmarks) merge with the
-            # next content line so lists read as "● text" / "1. text".
+            # next content line so lists read as "- text" / "1. text" instead
+            # of a bare glyph on its own line.
             markers = [text]
             next_index = index + 1
             while next_index < len(lines) and _MARKER_LINE_RE.match(
@@ -106,16 +153,31 @@ def _extract_page(page) -> str:
             ):
                 markers.append(lines[next_index][1])
                 next_index += 1
+            # A run of several standalone marker lines in a row (observed:
+            # four consecutive "•" lines before a section label) is a
+            # repeated decorative divider, not N distinct list items -- only
+            # the first is kept, so the divider becomes one list marker
+            # instead of leaving the extras stuck mid-line as literal glyphs.
+            marker = markers[0]
             if next_index < len(lines):
                 next_size, next_text = lines[next_index]
                 if len(markers) == 1 and is_heading(next_size, next_text):
-                    out.append(" ".join(markers))
+                    # A lone marker directly before a heading is decorative
+                    # (e.g. a divider glyph); keep it on its own line rather
+                    # than gluing it onto an unrelated title.
+                    out.append(_normalize_bullet_prefix(marker))
+                    pending = None
                     index += 1
                     continue
-                out.append(" ".join(markers) + " " + next_text)
+                combined = _normalize_bullet_prefix(marker + " " + next_text)
+                out.append(combined)
+                # The list item's own text may still wrap onto further plain
+                # lines below (see the reflow branch), so it stays open.
+                pending = (next_size, combined)
                 index = next_index + 1
             else:
-                out.append(" ".join(markers))
+                out.append(_normalize_bullet_prefix(marker))
+                pending = None
                 index = next_index
             continue
         if is_heading(size, text):
@@ -130,8 +192,30 @@ def _extract_page(page) -> str:
             joined = " ".join(part.replace("**", "") for part in heading_parts)
             joined = re.sub(r"\s+", " ", joined).strip()
             out.append(f"## {joined}")
+            pending = None
             continue
-        out.append(text)
+
+        normalized = _normalize_bullet_prefix(text)
+        # A line only continues whatever precedes it when: it's the same font
+        # size as that line, that line didn't already end its sentence, and
+        # this line reads as a continuation rather than a new one starting.
+        # Requiring a lowercase first character is what tells "tumataas"
+        # (continues "Dito") apart from "Paggamit ng isang tao..." (a new
+        # clause) -- and, as a side effect, a normalized "- " or "N. " list
+        # prefix is never lowercase, so a fresh list item is never glued onto
+        # whatever came before it.
+        if (
+            pending is not None
+            and size == pending[0]
+            and not pending[1].rstrip().endswith((".", "!", "?", ":"))
+            and normalized[:1].islower()
+        ):
+            merged = out[-1] + " " + normalized
+            out[-1] = merged
+            pending = (size, merged)
+        else:
+            out.append(normalized)
+            pending = (size, normalized)
         index += 1
     return "\n".join(out)
 
